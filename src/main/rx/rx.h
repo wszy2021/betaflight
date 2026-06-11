@@ -230,9 +230,11 @@ timeDelta_t rxGetFrameDelta(timeDelta_t *frameAgeUs);
 timeUs_t rxFrameTimeUs(void);
 
 // ============================================================
-// 双接收机支持 - 双串口RX系统
+// 多接收机支持 - 主RX + 辅助Link Statistics RX
 // ============================================================
- 
+
+#define MAX_AUX_RSSI_RECEIVERS 2
+
 #define MAX_RX_INSTANCES 2
  
 // 接收机实例标识符
@@ -267,7 +269,7 @@ typedef struct auxiliaryRxRssi_s {
 // ============================================================
  
 extern rxMultiInstance_t rxMultiInstance;          // 双接收机系统状态
-extern auxiliaryRxRssi_t auxRssiData;            // 辅助RSSI数据
+extern auxiliaryRxRssi_t auxRssiData[MAX_AUX_RSSI_RECEIVERS]; // 辅助RSSI数据
 extern bool rxDualModeEnabled;                    // 双接收机模式是否启用
  
 // ============================================================
@@ -287,11 +289,14 @@ void rxMultiInstanceSetPrimaryInstance(rxInstance_e instance);
 rxInstance_e rxMultiInstanceGetPrimaryInstance(void);
  
 // 获取辅助RSSI数据指针
-auxiliaryRxRssi_t* rxGetAuxiliaryRssiData(void);
- 
+auxiliaryRxRssi_t* rxGetAuxiliaryRssiData(uint8_t auxIndex);
+
 // 更新辅助RSSI数据（从协议层调用）
-void rxUpdateAuxiliaryRssi(int16_t rssi1Dbm, int16_t rssi2Dbm, uint8_t activeAntenna);
- 
+void rxUpdateAuxiliaryRssi(uint8_t auxIndex, int16_t rssi1Dbm, int16_t rssi2Dbm, uint8_t activeAntenna);
+
+// 检查辅助RSSI监控是否启用
+bool rxIsAuxiliaryRssiEnabled(void);
+
 // 检查双接收机模式是否启用
 bool rxIsDualModeEnabled(void);
  

@@ -190,6 +190,7 @@ typedef enum {
     OSD_GPS_LAP_TIME_PREVIOUS,
     OSD_GPS_LAP_TIME_BEST3,
     OSD_DUAL_RSSI_DBM,
+    OSD_AUX2_RSSI_DBM,
     OSD_ITEM_COUNT // MUST BE LAST
 } osd_items_e;
 

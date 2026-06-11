@@ -139,8 +139,11 @@ void pgResetFn_serialConfig(serialConfig_t *serialConfig)
         serialConfig->portConfigs[i].gps_baudrateIndex = BAUD_57600;
         serialConfig->portConfigs[i].telemetry_baudrateIndex = BAUD_AUTO;
         serialConfig->portConfigs[i].blackbox_baudrateIndex = BAUD_115200;
-        if(serialConfig->portConfigs[i].identifier == SERIAL_PORT_USART2){
+        if (serialConfig->portConfigs[i].identifier == SERIAL_PORT_USART2) {
             serialConfig->portConfigs[i].functionMask = FUNCTION_RX_SERIAL_AUX;
+        }
+        if (serialConfig->portConfigs[i].identifier == SERIAL_PORT_USART3) {
+            serialConfig->portConfigs[i].functionMask = FUNCTION_RX_SERIAL_AUX2;
         }
     }
 
@@ -355,7 +358,7 @@ bool isSerialConfigValid(serialConfig_t *serialConfigToCheck)
         if ((portConfig->identifier == SERIAL_PORT_SOFTSERIAL1) ||
             (portConfig->identifier == SERIAL_PORT_SOFTSERIAL2)) {
             // Ensure MSP or serial RX is not enabled on soft serial ports
-            serialConfigToCheck->portConfigs[index].functionMask &= ~(FUNCTION_MSP | FUNCTION_RX_SERIAL);
+            serialConfigToCheck->portConfigs[index].functionMask &= ~(FUNCTION_MSP | FUNCTION_RX_SERIAL | FUNCTION_RX_SERIAL_AUX | FUNCTION_RX_SERIAL_AUX2);
             // Ensure that the baud rate on soft serial ports is limited to 19200
 #ifndef USE_OVERRIDE_SOFTSERIAL_BAUDRATE
             serialConfigToCheck->portConfigs[index].gps_baudrateIndex = constrain(portConfig->gps_baudrateIndex, BAUD_AUTO, BAUD_19200);

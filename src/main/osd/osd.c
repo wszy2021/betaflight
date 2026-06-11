@@ -158,7 +158,7 @@ STATIC_ASSERT(OSD_POS_MAX == OSD_POS(63,31), OSD_POS_MAX_incorrect);
 
 PG_REGISTER_WITH_RESET_FN(osdConfig_t, osdConfig, PG_OSD_CONFIG, 12);
 
-PG_REGISTER_WITH_RESET_FN(osdElementConfig_t, osdElementConfig, PG_OSD_ELEMENT_CONFIG, 1);
+PG_REGISTER_WITH_RESET_FN(osdElementConfig_t, osdElementConfig, PG_OSD_ELEMENT_CONFIG, 2);
 
 // Controls the display order of the OSD post-flight statistics.
 // Adjust the ordering here to control how the post-flight stats are presented.
@@ -447,7 +447,8 @@ void pgResetFn_osdElementConfig(osdElementConfig_t *osdElementConfig)
     for (int i = 0; i < OSD_ITEM_COUNT; i++) {
         osdElementConfig->item_pos[i] = OSD_POS((midCol - 5), midRow);
     }
-    osdElementConfig->item_pos[OSD_DUAL_RSSI_DBM] = OSD_POS(15, 1);
+    osdElementConfig->item_pos[OSD_DUAL_RSSI_DBM] = OSD_POS(1, 1);
+    osdElementConfig->item_pos[OSD_AUX2_RSSI_DBM] = OSD_POS(1, 2);
     // Always enable warnings elements by default
     uint16_t profileFlags = 0;
     for (unsigned i = 1; i <= OSD_PROFILE_COUNT; i++) {

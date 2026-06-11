@@ -152,15 +152,7 @@ rxMultiInstance_t rxMultiInstance = {
     .initialized = false,
 };
  
-auxiliaryRxRssi_t auxRssiData = {
-    .rssi1Dbm = -130,
-    .rssi2Dbm = -130,
-    .activeAntenna = 0,
-    .lastUpdateMs = 0,
-    .valid = false,
-    .linkQuality = 0,
-    .snr = -30,
-};
+auxiliaryRxRssi_t auxRssiData[MAX_AUX_RSSI_RECEIVERS];
  
 bool rxDualModeEnabled = false;
  
@@ -1234,67 +1226,27 @@ void rxMultiInstanceInit(const rxConfig_t *rxConfig)
         if (primaryEnabled) {
             rxMultiInstance.activeInstanceCount++;
             rxMultiInstance.primaryInstance = RX_INSTANCE_PRIMARY;
+            rxDualModeEnabled = true;
+            rxRuntimeState = rxMultiInstance.rxRuntimeState[RX_INSTANCE_PRIMARY];
         } else {
-            // 主接收机初始化失败，禁用双模式
             return;
         }
     }
-    
-    // 查找辅助接收机串口配置
-    const serialPortConfig_t *auxPortConfig = findSerialPortConfig(FUNCTION_RX_SERIAL_AUX);
-    // const serialPortConfig_t *auxPortConfig = serialFindPortConfiguration(SERIAL_PORT_USART2);
-    
-    if (auxPortConfig && rxConfig->aux_serialrx_provider != 0) {
-        // 初始化辅助接收机实例
-        memset(&rxMultiInstance.rxRuntimeState[RX_INSTANCE_AUXILIARY], 0, sizeof(rxRuntimeState_t));
-        rxMultiInstance.rxRuntimeState[RX_INSTANCE_AUXILIARY].serialrxProvider = rxConfig->aux_serialrx_provider;
-        rxMultiInstance.rxRuntimeState[RX_INSTANCE_AUXILIARY].rxProvider = RX_PROVIDER_SERIAL;
-        
-        // 初始化函数指针
-        rxMultiInstance.rxRuntimeState[RX_INSTANCE_AUXILIARY].rcReadRawFn = nullReadRawRC;
-        rxMultiInstance.rxRuntimeState[RX_INSTANCE_AUXILIARY].rcFrameStatusFn = nullFrameStatus;
-        rxMultiInstance.rxRuntimeState[RX_INSTANCE_AUXILIARY].rcProcessFrameFn = nullProcessFrame;
-        rxMultiInstance.rxRuntimeState[RX_INSTANCE_AUXILIARY].lastRcFrameTimeUs = 0;
-        
-        // 创建临时配置结构用于初始化
-        rxConfig_t auxConfig = *rxConfig;
-        auxConfig.serialrx_provider = rxConfig->aux_serialrx_provider;
-        
-        // 尝试初始化辅助接收机
-        bool auxEnabled = false;
-        
-#ifdef USE_SERIALRX_CRSF
-        if (rxConfig->aux_serialrx_provider == SERIALRX_CRSF) {
-            auxEnabled = crsfRxInit2(&auxConfig, &rxMultiInstance.rxRuntimeState[RX_INSTANCE_AUXILIARY]);
-        }
-#endif
-#ifdef USE_SERIALRX_FPORT
-        if (rxConfig->aux_serialrx_provider == SERIALRX_FPORT) {
-            auxEnabled = fportRxInit(&auxConfig, &rxMultiInstance.rxRuntimeState[RX_INSTANCE_AUXILIARY]);
-        }
-#endif
-#ifdef USE_SERIALRX_SRXL2
-        if (rxConfig->aux_serialrx_provider == SERIALRX_SRXL2) {
-            auxEnabled = srxl2RxInit(&auxConfig, &rxMultiInstance.rxRuntimeState[RX_INSTANCE_AUXILIARY]);
-        }
-#endif
-#ifdef USE_SERIALRX_GHST
-        if (rxConfig->aux_serialrx_provider == SERIALRX_GHST) {
-            auxEnabled = ghstRxInit(&auxConfig, &rxMultiInstance.rxRuntimeState[RX_INSTANCE_AUXILIARY]);
-        }
-#endif
-        
-        if (auxEnabled) {
-            rxMultiInstance.activeInstanceCount++;
-            rxMultiInstance.auxiliaryInstance = RX_INSTANCE_AUXILIARY;
-            rxMultiInstance.auxiliaryRssiEnabled = true;
-            rxDualModeEnabled = true;
-            
-            // 复制主接收机的全局状态到全局变量（保持兼容性）
-            rxRuntimeState = rxMultiInstance.rxRuntimeState[RX_INSTANCE_PRIMARY];
-        }
+
+    for (int i = 0; i < MAX_AUX_RSSI_RECEIVERS; i++) {
+        auxRssiData[i].rssi1Dbm = CRSF_RSSI_MIN;
+        auxRssiData[i].rssi2Dbm = CRSF_RSSI_MIN;
+        auxRssiData[i].activeAntenna = 0;
+        auxRssiData[i].lastUpdateMs = 0;
+        auxRssiData[i].valid = false;
     }
-    
+
+#ifdef USE_SERIALRX_CRSF
+    if (crsfRxAuxInit(rxConfig)) {
+        rxMultiInstance.auxiliaryRssiEnabled = true;
+    }
+#endif
+
     rxMultiInstance.initialized = true;
 }
  
@@ -1352,54 +1304,41 @@ rxInstance_e rxMultiInstanceGetPrimaryInstance(void)
 /**
  * 获取辅助RSSI数据指针
  */
-auxiliaryRxRssi_t* rxGetAuxiliaryRssiData(void)
+auxiliaryRxRssi_t* rxGetAuxiliaryRssiData(uint8_t auxIndex)
 {
-    return &auxRssiData;
+    if (auxIndex >= MAX_AUX_RSSI_RECEIVERS) {
+        return NULL;
+    }
+
+    return &auxRssiData[auxIndex];
 }
- 
-/**
- * 更新辅助RSSI数据
- * 由协议层（如CRSF）在接收到Link Statistics时调用
- * @param rssi1Dbm 天线1 RSSI (dBm)
- * @param rssi2Dbm 天线2 RSSI (dBm)
- * @param activeAntenna 当前活动天线 (0或1)
- */
-void rxUpdateAuxiliaryRssi(int16_t rssi1Dbm, int16_t rssi2Dbm, uint8_t activeAntenna)
+
+void rxUpdateAuxiliaryRssi(uint8_t auxIndex, int16_t rssi1Dbm, int16_t rssi2Dbm, uint8_t activeAntenna)
 {
-    auxRssiData.rssi1Dbm = rssi1Dbm;
-    auxRssiData.rssi2Dbm = rssi2Dbm;
-    auxRssiData.activeAntenna = activeAntenna;
-    auxRssiData.lastUpdateMs = millis();
-    auxRssiData.valid = true;
+    if (auxIndex >= MAX_AUX_RSSI_RECEIVERS) {
+        return;
+    }
+
+    auxRssiData[auxIndex].rssi1Dbm = rssi1Dbm;
+    auxRssiData[auxIndex].rssi2Dbm = rssi2Dbm;
+    auxRssiData[auxIndex].activeAntenna = activeAntenna;
+    auxRssiData[auxIndex].lastUpdateMs = millis();
+    auxRssiData[auxIndex].valid = true;
 }
- 
-/**
- * 检查双接收机模式是否启用
- */
+
+bool rxIsAuxiliaryRssiEnabled(void)
+{
+    return rxMultiInstance.auxiliaryRssiEnabled;
+}
+
 bool rxIsDualModeEnabled(void)
 {
     return rxDualModeEnabled;
 }
- 
-/**
- * 处理辅助接收机数据
- * 在主循环中调用，用于更新辅助RX的RSSI数据
- * @param currentTimeUs 当前时间（微秒）
- */
+
 void rxProcessAuxiliaryReceiver(void)
 {
-    if (!rxDualModeEnabled || !rxMultiInstance.auxiliaryRssiEnabled) {
-        return;
-    }
-    
-    rxInstance_e auxInstance = rxMultiInstance.auxiliaryInstance;
-    rxMultiInstanceProcessFrame(auxInstance);
-    
-    // 检查辅助RX数据是否过期
-    // if (auxRssiData.valid && (millis() - auxRssiData.lastUpdateMs > 1000)) {
-    //     // 1秒无更新，标记为无效
-    //     auxRssiData.valid = false;
-    // }
+    // 辅助串口在ISR中仅处理Link Statistics，无需主循环帧处理
 }
  
 /**

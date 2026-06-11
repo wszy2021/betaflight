@@ -74,8 +74,21 @@ static uint8_t telemetryBuf[CRSF_FRAME_SIZE_MAX];
 static uint8_t telemetryBufLen = 0;
 static float channelScale = CRSF_RC_CHANNEL_SCALE_LEGACY;
 
-// 辅助RX的串口标识符（用于区分主/辅助RX）
-static serialPortIdentifier_e auxiliarySerialPortIdentifier = SERIAL_PORT_USART2;
+#if defined(USE_CRSF_LINK_STATISTICS)
+typedef struct crsfAuxLinkStatsPort_s {
+    serialPort_t *port;
+    crsfFrame_t frame;
+    uint8_t framePosition;
+    timeUs_t frameStartAtUs;
+    uint8_t auxIndex;
+} crsfAuxLinkStatsPort_t;
+
+static crsfAuxLinkStatsPort_t crsfAuxPorts[MAX_AUX_RSSI_RECEIVERS];
+static const serialPortFunction_e crsfAuxPortFunctions[MAX_AUX_RSSI_RECEIVERS] = {
+    FUNCTION_RX_SERIAL_AUX,
+    FUNCTION_RX_SERIAL_AUX2,
+};
+#endif
 
 #ifdef USE_RX_LINK_UPLINK_POWER
 #define CRSF_UPLINK_POWER_LEVEL_MW_ITEMS_COUNT 9
@@ -227,33 +240,23 @@ typedef struct crsfPayloadLinkstatisticsTx_s {
 static timeUs_t lastLinkStatisticsFrameUs;
 
 // ============================================================
-// 辅助RX Link Statistics处理
+// 辅助RX Link Statistics处理（FUNCTION_RX_SERIAL_AUX 专用）
 // ============================================================
- 
+
 /**
- * 检查当前串口是否为辅助接收机
+ * 处理辅助串口的Link Statistics帧
+ * 不更新主RSSI，而是更新辅助RSSI数据结构供OSD显示
  */
-static bool isAuxiliaryReceiverSerialPort(void)
-{
-    return (serialPort && (serialPort->identifier == auxiliarySerialPortIdentifier));
-}
- 
-/**
- * 处理辅助接收机的Link Statistics帧
- * 不更新主RSSI，而是更新辅助RSSI数据结构
- */
-static void handleCrsfLinkStatisticsFrameAuxiliary(const crsfLinkStatistics_t* statsPtr, timeUs_t currentTimeUs)
+static void handleCrsfLinkStatisticsFrameAuxiliary(const crsfLinkStatistics_t* statsPtr, timeUs_t currentTimeUs, uint8_t auxIndex)
 {
     const crsfLinkStatistics_t stats = *statsPtr;
     lastLinkStatisticsFrameUs = currentTimeUs;
-    
-    // 提取双天线RSSI数据
-    int16_t rssi1Dbm = -1 * (int16_t)stats.uplink_RSSI_1;
-    int16_t rssi2Dbm = -1 * (int16_t)stats.uplink_RSSI_2;
-    uint8_t activeAntenna = stats.active_antenna;
-    
-    // 更新辅助RSSI数据
-    rxUpdateAuxiliaryRssi(rssi1Dbm, rssi2Dbm, activeAntenna);
+
+    const int16_t rssi1Dbm = -1 * (int16_t)stats.uplink_RSSI_1;
+    const int16_t rssi2Dbm = -1 * (int16_t)stats.uplink_RSSI_2;
+    const uint8_t activeAntenna = stats.active_antenna;
+
+    rxUpdateAuxiliaryRssi(auxIndex, rssi1Dbm, rssi2Dbm, activeAntenna);
     
     // 更新调试信息
     DEBUG_SET(DEBUG_CRSF_LINK_STATISTICS_UPLINK, 0, stats.uplink_RSSI_1);
@@ -268,13 +271,6 @@ static void handleCrsfLinkStatisticsFrameAuxiliary(const crsfLinkStatistics_t* s
 
 static void handleCrsfLinkStatisticsFrame(const crsfLinkStatistics_t* statsPtr, timeUs_t currentTimeUs)
 {
-    // 检查是否为辅助接收机
-    if (rxIsDualModeEnabled() && isAuxiliaryReceiverSerialPort()) {
-        handleCrsfLinkStatisticsFrameAuxiliary(statsPtr, currentTimeUs);
-        return;
-    }
-    
-    // 主接收机的原始处理逻辑
     const crsfLinkStatistics_t stats = *statsPtr;
     lastLinkStatisticsFrameUs = currentTimeUs;
     
@@ -358,6 +354,9 @@ static void handleCrsfLinkStatisticsTxFrame(const crsfLinkStatisticsTx_t* statsP
 #if defined(USE_CRSF_LINK_STATISTICS)
 static void crsfCheckRssi(uint32_t currentTimeUs)
 {
+    if (rxIsDualModeEnabled()) {
+        return;
+    }
 
     if (cmpTimeUs(currentTimeUs, lastLinkStatisticsFrameUs) > CRSF_LINK_STATUS_UPDATE_TIMEOUT_US) {
         if (rssiSource == RSSI_SOURCE_RX_PROTOCOL_CRSF) {
@@ -378,14 +377,18 @@ static void crsfCheckRssi(uint32_t currentTimeUs)
 }
 #endif
 
-STATIC_UNIT_TESTED uint8_t crsfFrameCRC(void)
+static uint8_t crsfCalculateFrameCRC(const crsfFrame_t *frame)
 {
-    // CRC includes type and payload
-    uint8_t crc = crc8_dvb_s2(0, crsfFrame.frame.type);
-    for (int ii = 0; ii < crsfFrame.frame.frameLength - CRSF_FRAME_LENGTH_TYPE_CRC; ++ii) {
-        crc = crc8_dvb_s2(crc, crsfFrame.frame.payload[ii]);
+    uint8_t crc = crc8_dvb_s2(0, frame->frame.type);
+    for (int ii = 0; ii < frame->frame.frameLength - CRSF_FRAME_LENGTH_TYPE_CRC; ++ii) {
+        crc = crc8_dvb_s2(crc, frame->frame.payload[ii]);
     }
     return crc;
+}
+
+STATIC_UNIT_TESTED uint8_t crsfFrameCRC(void)
+{
+    return crsfCalculateFrameCRC(&crsfFrame);
 }
 
 #if defined(USE_CRSF_V3) || defined(UNIT_TEST)
@@ -478,37 +481,9 @@ STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
                 }
 #endif
 #if defined(USE_CRSF_LINK_STATISTICS)
-
-                // case CRSF_FRAMETYPE_LINK_STATISTICS: {
-                //     // if to FC and 10 bytes + CRSF_FRAME_ORIGIN_DEST_SIZE
-                //     // if ((rssiSource == RSSI_SOURCE_RX_PROTOCOL_CRSF) &&
-                //     //     (crsfFrame.frame.deviceAddress == CRSF_ADDRESS_FLIGHT_CONTROLLER) &&
-                //     //     (crsfFrame.frame.frameLength == CRSF_FRAME_ORIGIN_DEST_SIZE + CRSF_FRAME_LINK_STATISTICS_PAYLOAD_SIZE)) {
-                //     //     const crsfLinkStatistics_t* statsFrame = (const crsfLinkStatistics_t*)&crsfFrame.frame.payload;
-                //     //     handleCrsfLinkStatisticsFrame(statsFrame, currentTimeUs);
-                //     // }
-                //     // break;
-                //     bool isAuxiliaryRx = (serialPort && (serialPort->identifier == findSerialPortConfig(FUNCTION_RX_SERIAL_AUX)->identifier));
-    
-                //     if ((rssiSource == RSSI_SOURCE_RX_PROTOCOL_CRSF) &&
-                //         (crsfFrame.frame.deviceAddress == CRSF_ADDRESS_FLIGHT_CONTROLLER) &&
-                //         (crsfFrame.frame.frameLength == CRSF_FRAME_ORIGIN_DEST_SIZE + CRSF_FRAME_LINK_STATISTICS_PAYLOAD_SIZE)) {
-                //         const crsfLinkStatistics_t* statsFrame = (const crsfLinkStatistics_t*)&crsfFrame.frame.payload;
-                //         handleCrsfLinkStatisticsFrame(statsFrame, currentTimeUs, isAuxiliaryRx);
-                //     }
-                //     break;
-                // }
                 case CRSF_FRAMETYPE_LINK_STATISTICS: {
-                    // 更新辅助串口标识符
-                    // const serialPortConfig_t *auxPortConfig = findSerialPortConfig(FUNCTION_RX_SERIAL_AUX);
-                    // if (auxPortConfig) {
-                    //     auxiliarySerialPortIdentifier = auxPortConfig->identifier;
-                    // }
-                    
-                    // 判断是否为辅助接收机
-                    bool isAuxiliaryRx = isAuxiliaryReceiverSerialPort();
-                    
-                    if ((rssiSource == RSSI_SOURCE_RX_PROTOCOL_CRSF || isAuxiliaryRx) &&
+                    if (!rxIsDualModeEnabled() &&
+                        (rssiSource == RSSI_SOURCE_RX_PROTOCOL_CRSF) &&
                         (crsfFrame.frame.deviceAddress == CRSF_ADDRESS_FLIGHT_CONTROLLER) &&
                         (crsfFrame.frame.frameLength == CRSF_FRAME_ORIGIN_DEST_SIZE + CRSF_FRAME_LINK_STATISTICS_PAYLOAD_SIZE)) {
                         const crsfLinkStatistics_t* statsFrame = (const crsfLinkStatistics_t*)&crsfFrame.frame.payload;
@@ -521,7 +496,8 @@ STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
                     break;
                 }
                 case CRSF_FRAMETYPE_LINK_STATISTICS_TX: {
-                    if ((rssiSource == RSSI_SOURCE_RX_PROTOCOL_CRSF) &&
+                    if (!rxIsDualModeEnabled() &&
+                        (rssiSource == RSSI_SOURCE_RX_PROTOCOL_CRSF) &&
                         (crsfFrame.frame.deviceAddress == CRSF_ADDRESS_FLIGHT_CONTROLLER) &&
                         (crsfFrame.frame.frameLength == CRSF_FRAME_ORIGIN_DEST_SIZE + CRSF_FRAME_LINK_STATISTICS_TX_PAYLOAD_SIZE)) {
                         const crsfLinkStatisticsTx_t* statsFrame = (const crsfLinkStatisticsTx_t*)&crsfFrame.frame.payload;
@@ -561,6 +537,45 @@ STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
 #endif
     }
 }
+
+#if defined(USE_CRSF_LINK_STATISTICS)
+// 辅助串口ISR：仅解析Link Statistics帧，忽略RC及其他帧
+static void crsfAuxLinkStatsDataReceive(uint16_t c, void *data)
+{
+    crsfAuxLinkStatsPort_t *auxPort = (crsfAuxLinkStatsPort_t *)data;
+    if (!auxPort) {
+        return;
+    }
+
+    const timeUs_t currentTimeUs = microsISR();
+
+    if (cmpTimeUs(currentTimeUs, auxPort->frameStartAtUs) > CRSF_TIME_NEEDED_PER_FRAME_US) {
+        auxPort->framePosition = 0;
+    }
+
+    if (auxPort->framePosition == 0) {
+        auxPort->frameStartAtUs = currentTimeUs;
+    }
+
+    const int fullFrameLength = auxPort->framePosition < 3 ? 5 : MIN(auxPort->frame.frame.frameLength + CRSF_FRAME_LENGTH_ADDRESS + CRSF_FRAME_LENGTH_FRAMELENGTH, CRSF_FRAME_SIZE_MAX);
+
+    if (auxPort->framePosition < fullFrameLength) {
+        auxPort->frame.bytes[auxPort->framePosition++] = (uint8_t)c;
+        if (auxPort->framePosition >= fullFrameLength) {
+            auxPort->framePosition = 0;
+            const uint8_t crc = crsfCalculateFrameCRC(&auxPort->frame);
+            if (crc == auxPort->frame.bytes[fullFrameLength - 1]) {
+                if (auxPort->frame.frame.type == CRSF_FRAMETYPE_LINK_STATISTICS &&
+                    (auxPort->frame.frame.deviceAddress == CRSF_ADDRESS_FLIGHT_CONTROLLER) &&
+                    (auxPort->frame.frame.frameLength == CRSF_FRAME_ORIGIN_DEST_SIZE + CRSF_FRAME_LINK_STATISTICS_PAYLOAD_SIZE)) {
+                    const crsfLinkStatistics_t* statsFrame = (const crsfLinkStatistics_t*)&auxPort->frame.frame.payload;
+                    handleCrsfLinkStatisticsFrameAuxiliary(statsFrame, currentTimeUs, auxPort->auxIndex);
+                }
+            }
+        }
+    }
+}
+#endif
 
 STATIC_UNIT_TESTED uint8_t crsfFrameStatus(rxRuntimeState_t *rxRuntimeState)
 {
@@ -747,47 +762,40 @@ bool crsfRxInit(const rxConfig_t *rxConfig, rxRuntimeState_t *rxRuntimeState)
     return serialPort != NULL;
 }
 
-bool crsfRxInit2(const rxConfig_t *rxConfig, rxRuntimeState_t *rxRuntimeState)
+bool crsfRxAuxInit(const rxConfig_t *rxConfig)
 {
-    for (int ii = 0; ii < CRSF_MAX_CHANNEL; ++ii) {
-        crsfChannelData[ii] = (16 * rxConfig->midrc) / 10 - 1408;
-    }
-
-    rxRuntimeState->channelCount = CRSF_MAX_CHANNEL;
-    rxRuntimeState->rcReadRawFn = crsfReadRawRC;
-    rxRuntimeState->rcFrameStatusFn = crsfFrameStatus;
-    rxRuntimeState->rcFrameTimeUsFn = rxFrameTimeUs;
-
-    const serialPortConfig_t *portConfig = findSerialPortConfig(FUNCTION_RX_SERIAL_AUX);
-    if (!portConfig) {
-        return false;
-    }
-
+    bool anyEnabled = false;
     uint32_t crsfBaudrate = CRSF_BAUDRATE;
 
 #if defined(USE_CRSF_V3)
     crsfBaudrate = rxConfig->crsf_use_negotiated_baud ? getCrsfCachedBaudrate() : CRSF_BAUDRATE;
 #endif
 
-    serialPort = openSerialPort(portConfig->identifier,
-        FUNCTION_RX_SERIAL,
-        crsfDataReceive,
-        rxRuntimeState,
-        crsfBaudrate,
-        CRSF_PORT_MODE,
-        CRSF_PORT_OPTIONS | (rxConfig->serialrx_inverted ? SERIAL_INVERTED : 0)
+    for (int i = 0; i < MAX_AUX_RSSI_RECEIVERS; i++) {
+        const serialPortConfig_t *portConfig = findSerialPortConfig(crsfAuxPortFunctions[i]);
+        if (!portConfig) {
+            crsfAuxPorts[i].port = NULL;
+            continue;
+        }
+
+        crsfAuxPorts[i].auxIndex = i;
+        crsfAuxPorts[i].framePosition = 0;
+        crsfAuxPorts[i].frameStartAtUs = 0;
+        crsfAuxPorts[i].port = openSerialPort(portConfig->identifier,
+            crsfAuxPortFunctions[i],
+            crsfAuxLinkStatsDataReceive,
+            &crsfAuxPorts[i],
+            crsfBaudrate,
+            CRSF_PORT_MODE,
+            CRSF_PORT_OPTIONS | (rxConfig->serialrx_inverted ? SERIAL_INVERTED : 0)
         );
 
-    if (rssiSource == RSSI_SOURCE_NONE) {
-        rssiSource = RSSI_SOURCE_RX_PROTOCOL_CRSF;
+        if (crsfAuxPorts[i].port) {
+            anyEnabled = true;
+        }
     }
-#ifdef USE_RX_LINK_QUALITY_INFO
-    if (linkQualitySource == LQ_SOURCE_NONE) {
-        linkQualitySource = LQ_SOURCE_RX_PROTOCOL_CRSF;
-    }
-#endif
 
-    return serialPort != NULL;
+    return anyEnabled;
 }
 
 #if defined(USE_CRSF_V3)
