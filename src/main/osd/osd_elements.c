@@ -1556,21 +1556,106 @@ static void osdElementRtcTime(osdElementParms_t *element)
 #ifdef USE_RX_RSSI_DBM
 static void osdElementRssiDbm(osdElementParms_t *element)
 {
-    const int8_t antenna = getActiveAntenna();
+    // const int8_t antenna = getActiveAntenna();
     const int16_t osdRssiDbm = getRssiDbm();
-    static bool diversity = false;
-
-    if (osdRssiDbm < osdConfig()->rssi_dbm_alarm) {
-        element->attr = DISPLAYPORT_SEVERITY_CRITICAL;
+    // static bool diversity = false;
+    auxiliaryRxRssi_t *rssiData = rxGetAuxiliaryRssiData();
+    if(rssiData){
+        int16_t rssi1 = rssiData->rssi1Dbm;
+        int16_t rssi2 = rssiData->rssi2Dbm;
+        // tfp_sprintf(element->buff, "%c%3d*%3d", SYM_RSSI, rssi1,rssi2);
+    if((rssi1 - 17) > rssi2)
+        tfp_sprintf(element->buff, "<<<<< %3d      ", rssi1);
+    else if((rssi1 - 12) > rssi2)
+        tfp_sprintf(element->buff, " <<<< %3d      ", rssi1);
+    else if((rssi1 - 8) > rssi2)
+        tfp_sprintf(element->buff, "  <<< %3d      ", rssi1);
+    else if((rssi1 - 5) > rssi2)
+        tfp_sprintf(element->buff, "   << %3d      ", rssi1);
+    else if((rssi1 - 3) > rssi2)
+        tfp_sprintf(element->buff, "    < %3d      ", rssi1);
+    else if((rssi2 - 17) > rssi1)
+        tfp_sprintf(element->buff, "      %3d >>>>>", rssi2);
+    else if((rssi2 - 12) > rssi1)
+        tfp_sprintf(element->buff, "      %3d >>>> ", rssi2);
+    else if((rssi2 - 8) > rssi1)
+        tfp_sprintf(element->buff, "      %3d >>>  ", rssi2);
+    else if((rssi2 - 5) > rssi1)
+        tfp_sprintf(element->buff, "      %3d >>   ", rssi2);
+    else if((rssi2 - 3) > rssi1)
+        tfp_sprintf(element->buff, "      %3d >    ", rssi2);
+    else
+        tfp_sprintf(element->buff, "      %3d      ", rssi1);
+    }else{
+        tfp_sprintf(element->buff, "%c%3d*", SYM_RSSI, osdRssiDbm);
     }
+    
 
-    if (antenna || diversity) {
-        diversity = true;
-        tfp_sprintf(element->buff, "%c%3d:%d", SYM_RSSI, osdRssiDbm, antenna + 1);
-    } else {
-        tfp_sprintf(element->buff, "%c%3d", SYM_RSSI, osdRssiDbm);
-    }
+    // if (osdRssiDbm < osdConfig()->rssi_dbm_alarm) {
+    //     element->attr = DISPLAYPORT_SEVERITY_CRITICAL;
+    // }
+
+    // if (antenna || diversity) {
+    //     diversity = true;
+    //     tfp_sprintf(element->buff, "%c%3d:%d", SYM_RSSI, osdRssiDbm, antenna + 1);
+    // } else {
+    //     tfp_sprintf(element->buff, "%c%3d", SYM_RSSI, osdRssiDbm);
+    // }
+    // tfp_sprintf(element->buff, "%c%3d %3d", SYM_RSSI, rssi1,rssi2);
 }
+
+// ============================================================
+// 双天线RSSI显示元素
+// ============================================================
+ 
+/**
+ * 显示辅助接收机的双天线RSSI
+ * 格式：RSSI -65:*1 -63: 2
+ * 其中 * 表示活动天线
+ */
+static void osdElementDualRssiDbm(osdElementParms_t *element)
+{
+    auxiliaryRxRssi_t *rssiData = rxGetAuxiliaryRssiData();
+    
+    // 检查数据有效性
+    // if (!rssiData || (millis() - rssiData->lastUpdateMs > 500)) {
+    //     // 数据无效或超过500ms未更新
+    //     tfp_sprintf(element->buff, "%c--- ---", SYM_RSSI);
+    //     element->attr = DISPLAYPORT_SEVERITY_WARNING;
+    //     return;
+    // }
+    if (!rssiData) {
+        return;
+    }
+    
+    // 显示两个天线的RSSI，高亮活动天线
+    // 格式：RSSI -65:*1 -63: 2  或  RSSI -65: 1 -63:*2
+    int16_t rssi1 = rssiData->rssi1Dbm;
+    int16_t rssi2 = rssiData->rssi2Dbm;
+    // uint8_t activeAntenna = rssiData->activeAntenna;
+    
+    // 根据活动天线高亮显示
+    // char ant1Mark = (activeAntenna == 0) ? '*' : ' ';
+    // char ant2Mark = (activeAntenna == 1) ? '*' : ' ';
+    
+    tfp_sprintf(element->buff, "%c%3d*%3d", 
+               SYM_RSSI, 
+               rssi1,
+               rssi2);
+    
+    // 设置告警颜色
+    // int16_t activeRssi = (activeAntenna == 0) ? rssi1 : rssi2;
+    // if (activeRssi < osdConfig()->rssi_dbm_alarm) {
+    //     element->attr = DISPLAYPORT_SEVERITY_CRITICAL;
+    // } else if (activeRssi < osdConfig()->rssi_dbm_alarm + 10) {
+    //     element->attr = DISPLAYPORT_SEVERITY_WARNING;
+    // } else {
+    //     element->attr = DISPLAYPORT_SEVERITY_NORMAL;
+    // }
+}
+ 
+// ============================================================
+
 #endif // USE_RX_RSSI_DBM
 
 #ifdef USE_RX_RSNR
@@ -1830,6 +1915,7 @@ static const uint8_t osdElementDisplayOrder[] = {
 #endif
 #ifdef USE_RX_RSSI_DBM
     OSD_RSSI_DBM_VALUE,
+    OSD_DUAL_RSSI_DBM,
 #endif
 #ifdef USE_RX_RSNR
     OSD_RSNR_VALUE,
@@ -1973,6 +2059,7 @@ const osdElementDrawFn osdElementDrawFunction[OSD_ITEM_COUNT] = {
 #endif
 #ifdef USE_RX_RSSI_DBM
     [OSD_RSSI_DBM_VALUE]          = osdElementRssiDbm,
+    [OSD_DUAL_RSSI_DBM]           = osdElementDualRssiDbm,
 #endif
 #ifdef USE_RX_RSNR
     [OSD_RSNR_VALUE]              = osdElementRsnr,

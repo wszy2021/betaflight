@@ -140,6 +140,32 @@ uint32_t validRxSignalTimeout[MAX_SUPPORTED_RC_CHANNEL_COUNT];
 rxRuntimeState_t rxRuntimeState;
 static uint8_t rcSampleIndex = 0;
 
+// ============================================================
+// 双接收机全局变量
+// ============================================================
+ 
+rxMultiInstance_t rxMultiInstance = {
+    .activeInstanceCount = 0,
+    .primaryInstance = RX_INSTANCE_PRIMARY,
+    .auxiliaryInstance = RX_INSTANCE_AUXILIARY,
+    .auxiliaryRssiEnabled = false,
+    .initialized = false,
+};
+ 
+auxiliaryRxRssi_t auxRssiData = {
+    .rssi1Dbm = -130,
+    .rssi2Dbm = -130,
+    .activeAntenna = 0,
+    .lastUpdateMs = 0,
+    .valid = false,
+    .linkQuality = 0,
+    .snr = -30,
+};
+ 
+bool rxDualModeEnabled = false;
+ 
+// ============================================================
+
 PG_REGISTER_ARRAY_WITH_RESET_FN(rxChannelRangeConfig_t, NON_AUX_CHANNEL_COUNT, rxChannelRangeConfigs, PG_RX_CHANNEL_RANGE_CONFIG, 0);
 void pgResetFn_rxChannelRangeConfigs(rxChannelRangeConfig_t *rxChannelRangeConfigs)
 {
@@ -277,123 +303,142 @@ static bool serialRxInit(const rxConfig_t *rxConfig, rxRuntimeState_t *rxRuntime
 
 void rxInit(void)
 {
-    if (featureIsEnabled(FEATURE_RX_PARALLEL_PWM)) {
-        rxRuntimeState.rxProvider = RX_PROVIDER_PARALLEL_PWM;
-    } else if (featureIsEnabled(FEATURE_RX_PPM)) {
-        rxRuntimeState.rxProvider = RX_PROVIDER_PPM;
-    } else if (featureIsEnabled(FEATURE_RX_SERIAL)) {
-        rxRuntimeState.rxProvider = RX_PROVIDER_SERIAL;
-    } else if (featureIsEnabled(FEATURE_RX_MSP)) {
-        rxRuntimeState.rxProvider = RX_PROVIDER_MSP;
-    } else if (featureIsEnabled(FEATURE_RX_SPI)) {
-        rxRuntimeState.rxProvider = RX_PROVIDER_SPI;
-    } else {
-        rxRuntimeState.rxProvider = RX_PROVIDER_NONE;
-    }
-    rxRuntimeState.serialrxProvider = rxConfig()->serialrx_provider;
-    rxRuntimeState.rcReadRawFn = nullReadRawRC;
-    rxRuntimeState.rcFrameStatusFn = nullFrameStatus;
-    rxRuntimeState.rcProcessFrameFn = nullProcessFrame;
-    rxRuntimeState.lastRcFrameTimeUs = 0;
-    rcSampleIndex = 0;
-
-    uint32_t now = millis();
-    for (int i = 0; i < MAX_SUPPORTED_RC_CHANNEL_COUNT; i++) {
-        rcData[i] = rxConfig()->midrc;
-        validRxSignalTimeout[i] = now + MAX_INVALID_PULSE_TIME_MS;
-    }
-
-    rcData[THROTTLE] = (featureIsEnabled(FEATURE_3D)) ? rxConfig()->midrc : rxConfig()->rx_min_usec;
-
-    // Initialize ARM switch to OFF position when arming via switch is defined
-    // TODO - move to rc_mode.c
-    for (int i = 0; i < MAX_MODE_ACTIVATION_CONDITION_COUNT; i++) {
-        const modeActivationCondition_t *modeActivationCondition = modeActivationConditions(i);
-        if (modeActivationCondition->modeId == BOXARM && IS_RANGE_USABLE(&modeActivationCondition->range)) {
-            // ARM switch is defined, determine an OFF value
-            float value;
-            if (modeActivationCondition->range.startStep > 0) {
-                value = MODE_STEP_TO_CHANNEL_VALUE((modeActivationCondition->range.startStep - 1));
-            } else {
-                value = MODE_STEP_TO_CHANNEL_VALUE((modeActivationCondition->range.endStep + 1));
-            }
-            // Initialize ARM AUX channel to OFF value
-            rcData[modeActivationCondition->auxChannelIndex + NON_AUX_CHANNEL_COUNT] = value;
+    // 首先初始化双接收机系统
+    rxMultiInstanceInit(rxConfig());
+    
+    // 如果双接收机模式未启用，使用传统单接收机初始化
+    if (!rxDualModeEnabled) {
+        // 传统单接收机初始化逻辑
+        if (featureIsEnabled(FEATURE_RX_PARALLEL_PWM)) {
+            rxRuntimeState.rxProvider = RX_PROVIDER_PARALLEL_PWM;
+        } else if (featureIsEnabled(FEATURE_RX_PPM)) {
+            rxRuntimeState.rxProvider = RX_PROVIDER_PPM;
+        } else if (featureIsEnabled(FEATURE_RX_SERIAL)) {
+            rxRuntimeState.rxProvider = RX_PROVIDER_SERIAL;
+        } else if (featureIsEnabled(FEATURE_RX_MSP)) {
+            rxRuntimeState.rxProvider = RX_PROVIDER_MSP;
+        } else if (featureIsEnabled(FEATURE_RX_SPI)) {
+            rxRuntimeState.rxProvider = RX_PROVIDER_SPI;
+        } else {
+            rxRuntimeState.rxProvider = RX_PROVIDER_NONE;
         }
-    }
-
-    switch (rxRuntimeState.rxProvider) {
-    default:
-
-        break;
+        rxRuntimeState.serialrxProvider = rxConfig()->serialrx_provider;
+        rxRuntimeState.rcReadRawFn = nullReadRawRC;
+        rxRuntimeState.rcFrameStatusFn = nullFrameStatus;
+        rxRuntimeState.rcProcessFrameFn = nullProcessFrame;
+        rxRuntimeState.lastRcFrameTimeUs = 0;
+        rcSampleIndex = 0;
+ 
+        uint32_t now = millis();
+        for (int i = 0; i < MAX_SUPPORTED_RC_CHANNEL_COUNT; i++) {
+            rcData[i] = rxConfig()->midrc;
+            validRxSignalTimeout[i] = now + MAX_INVALID_PULSE_TIME_MS;
+        }
+ 
+        rcData[THROTTLE] = (featureIsEnabled(FEATURE_3D)) ? rxConfig()->midrc : rxConfig()->rx_min_usec;
+ 
+        // Initialize ARM switch to OFF position
+        for (int i = 0; i < MAX_MODE_ACTIVATION_CONDITION_COUNT; i++) {
+            const modeActivationCondition_t *modeActivationCondition = modeActivationConditions(i);
+            if (modeActivationCondition->modeId == BOXARM && IS_RANGE_USABLE(&modeActivationCondition->range)) {
+                float value;
+                if (modeActivationCondition->range.startStep > 0) {
+                    value = MODE_STEP_TO_CHANNEL_VALUE((modeActivationCondition->range.startStep - 1));
+                } else {
+                    value = MODE_STEP_TO_CHANNEL_VALUE((modeActivationCondition->range.endStep + 1));
+                }
+                rcData[modeActivationCondition->auxChannelIndex + NON_AUX_CHANNEL_COUNT] = value;
+            }
+        }
+ 
+        switch (rxRuntimeState.rxProvider) {
+        default:
+            break;
 #ifdef USE_SERIALRX
-    case RX_PROVIDER_SERIAL:
-        {
-            const bool enabled = serialRxInit(rxConfig(), &rxRuntimeState);
-            if (!enabled) {
-                rxRuntimeState.rcReadRawFn = nullReadRawRC;
-                rxRuntimeState.rcFrameStatusFn = nullFrameStatus;
+        case RX_PROVIDER_SERIAL:
+            {
+                const bool enabled = serialRxInit(rxConfig(), &rxRuntimeState);
+                if (!enabled) {
+                    rxRuntimeState.rcReadRawFn = nullReadRawRC;
+                    rxRuntimeState.rcFrameStatusFn = nullFrameStatus;
+                }
             }
-        }
-
-        break;
+            break;
 #endif
-
+ 
 #ifdef USE_RX_MSP
-    case RX_PROVIDER_MSP:
-        rxMspInit(rxConfig(), &rxRuntimeState);
-
-        break;
+        case RX_PROVIDER_MSP:
+            rxMspInit(rxConfig(), &rxRuntimeState);
+            break;
 #endif
-
+ 
 #ifdef USE_RX_SPI
-    case RX_PROVIDER_SPI:
-        {
-            const bool enabled = rxSpiInit(rxSpiConfig(), &rxRuntimeState);
-            if (!enabled) {
-                rxRuntimeState.rcReadRawFn = nullReadRawRC;
-                rxRuntimeState.rcFrameStatusFn = nullFrameStatus;
+        case RX_PROVIDER_SPI:
+            {
+                const bool enabled = rxSpiInit(rxSpiConfig(), &rxRuntimeState);
+                if (!enabled) {
+                    rxRuntimeState.rcReadRawFn = nullReadRawRC;
+                    rxRuntimeState.rcFrameStatusFn = nullFrameStatus;
+                }
             }
-        }
-
-        break;
+            break;
 #endif
-
+ 
 #if defined(USE_RX_PWM) || defined(USE_RX_PPM)
-    case RX_PROVIDER_PPM:
-    case RX_PROVIDER_PARALLEL_PWM:
-        rxPwmInit(rxConfig(), &rxRuntimeState);
-
-        break;
+        case RX_PROVIDER_PPM:
+        case RX_PROVIDER_PARALLEL_PWM:
+            rxPwmInit(rxConfig(), &rxRuntimeState);
+            break;
 #endif
-    }
-
+        }
+ 
 #if defined(USE_ADC)
-    if (featureIsEnabled(FEATURE_RSSI_ADC)) {
-        rssiSource = RSSI_SOURCE_ADC;
-    } else
+        if (featureIsEnabled(FEATURE_RSSI_ADC)) {
+            rssiSource = RSSI_SOURCE_ADC;
+        } else
 #endif
-    if (rxConfig()->rssi_channel > 0) {
-        rssiSource = RSSI_SOURCE_RX_CHANNEL;
-    }
-
-    // Setup source frame RSSI filtering to take averaged values every FRAME_ERR_RESAMPLE_US
-    pt1FilterInit(&frameErrFilter, pt1FilterGain(GET_FRAME_ERR_LPF_FREQUENCY(rxConfig()->rssi_src_frame_lpf_period), FRAME_ERR_RESAMPLE_US * 1e-6f));
-
-    // Configurable amount of filtering to remove excessive jumpiness of the values on the osd
-    float k = (256.0f - rxConfig()->rssi_smoothing) / 256.0f;
-
-    pt1FilterInit(&rssiFilter, k);
-
+        if (rxConfig()->rssi_channel > 0) {
+            rssiSource = RSSI_SOURCE_RX_CHANNEL;
+        }
+ 
+        pt1FilterInit(&frameErrFilter, pt1FilterGain(GET_FRAME_ERR_LPF_FREQUENCY(rxConfig()->rssi_src_frame_lpf_period), FRAME_ERR_RESAMPLE_US * 1e-6f));
+ 
+        float k = (256.0f - rxConfig()->rssi_smoothing) / 256.0f;
+        pt1FilterInit(&rssiFilter, k);
+ 
 #ifdef USE_RX_RSSI_DBM
-    pt1FilterInit(&rssiDbmFilter, k);
-#endif //USE_RX_RSSI_DBM
-
+        pt1FilterInit(&rssiDbmFilter, k);
+#endif
+ 
 #ifdef USE_RX_RSNR
-    pt1FilterInit(&rsnrFilter, k);
-#endif //USE_RX_RSNR
-
-    rxChannelCount = MIN(rxConfig()->max_aux_channel + NON_AUX_CHANNEL_COUNT, rxRuntimeState.channelCount);
+        pt1FilterInit(&rsnrFilter, k);
+#endif
+ 
+        rxChannelCount = MIN(rxConfig()->max_aux_channel + NON_AUX_CHANNEL_COUNT, rxRuntimeState.channelCount);
+    } else {
+        // 双接收机模式：初始化已由 rxMultiInstanceInit 完成
+        // 只需要初始化过滤器和通道数据
+        uint32_t now = millis();
+        for (int i = 0; i < MAX_SUPPORTED_RC_CHANNEL_COUNT; i++) {
+            rcData[i] = rxConfig()->midrc;
+            validRxSignalTimeout[i] = now + MAX_INVALID_PULSE_TIME_MS;
+        }
+        rcData[THROTTLE] = (featureIsEnabled(FEATURE_3D)) ? rxConfig()->midrc : rxConfig()->rx_min_usec;
+ 
+        // 初始化过滤器
+        pt1FilterInit(&frameErrFilter, pt1FilterGain(GET_FRAME_ERR_LPF_FREQUENCY(rxConfig()->rssi_src_frame_lpf_period), FRAME_ERR_RESAMPLE_US * 1e-6f));
+        float k = (256.0f - rxConfig()->rssi_smoothing) / 256.0f;
+        pt1FilterInit(&rssiFilter, k);
+#ifdef USE_RX_RSSI_DBM
+        pt1FilterInit(&rssiDbmFilter, k);
+#endif
+#ifdef USE_RX_RSNR
+        pt1FilterInit(&rsnrFilter, k);
+#endif
+        
+        rxRuntimeState_t *primaryRx = &rxMultiInstance.rxRuntimeState[rxMultiInstance.primaryInstance];
+        rxChannelCount = MIN(rxConfig()->max_aux_channel + NON_AUX_CHANNEL_COUNT, primaryRx->channelCount);
+    }
 }
 
 bool rxIsReceivingSignal(void)
@@ -769,6 +814,48 @@ void detectAndApplySignalLossBehaviour(void)
 
 bool calculateRxChannelsAndUpdateFailsafe(timeUs_t currentTimeUs)
 {
+    // 处理辅助接收机（如果启用）
+    if (rxDualModeEnabled) {
+        rxProcessAuxiliaryReceiver();
+        
+        // 使用主接收机实例
+        rxRuntimeState_t *primaryRxState = &rxMultiInstance.rxRuntimeState[rxMultiInstance.primaryInstance];
+        
+        // 检查超时
+        if (currentTimeUs > needRxSignalBefore) {
+            rxSignalReceived = false;
+            rxFlightChannelsValid = false;
+        }
+        
+        // 读取主接收机通道数据
+        if (primaryRxState->rcReadRawFn) {
+            rxChannelCount = primaryRxState->channelCount;
+            
+            for (int channel = 0; channel < MAX_SUPPORTED_RC_CHANNEL_COUNT; channel++) {
+                if (channel < rxChannelCount) {
+                    rcData[channel] = primaryRxState->rcReadRawFn(primaryRxState, channel);
+                }
+            }
+        }
+    } else {
+        // 传统单接收机模式（保持原有逻辑）
+        // ... 原有代码保持不变 ...
+        if (currentTimeUs > needRxSignalBefore) {
+            rxSignalReceived = false;
+            rxFlightChannelsValid = false;
+        }
+        
+        if (rxRuntimeState.rcReadRawFn) {
+            rxChannelCount = rxRuntimeState.channelCount;
+            
+            for (int channel = 0; channel < MAX_SUPPORTED_RC_CHANNEL_COUNT; channel++) {
+                if (channel < rxChannelCount) {
+                    rcData[channel] = rxRuntimeState.rcReadRawFn(&rxRuntimeState, channel);
+                }
+            }
+        }
+    }
+
     if (auxiliaryProcessingRequired) {
         rxRuntimeState.rcProcessFrameFn(&rxRuntimeState);
         auxiliaryProcessingRequired = false;
@@ -851,6 +938,24 @@ static void updateRSSIPWM(void)
     // Range of rawPwmRssi is [1000;2000]. rssi should be in [0;1023];
     setRssiDirect(scaleRange(constrain(pwmRssi, PWM_RANGE_MIN, PWM_RANGE_MAX), PWM_RANGE_MIN, PWM_RANGE_MAX, 0, RSSI_MAX_VALUE), RSSI_SOURCE_RX_CHANNEL);
 }
+// static void updateRSSIPWM(void)
+// {
+//     // Read value of AUX channel as rssi from rcRaw to get unprocessed raw channel data
+//     // This allows RSSI to be read even when unbound or in failsafe
+//     const int16_t rssiChannelIndex = rxConfig()->rssi_channel - 1;
+//     int16_t pwmRssi;
+    
+//     // Use rcRaw instead of rcData to get the actual receiver output
+//     // rcRaw contains the latest raw channel data from the receiver
+//     if (rssiChannelIndex >= 0 && rssiChannelIndex < MAX_SUPPORTED_RC_CHANNEL_COUNT) {
+//         pwmRssi = rcRaw[rssiChannelIndex];
+//     } else {
+//         pwmRssi = PWM_RANGE_MIN;
+//     }
+ 
+//     // Range of rawPwmRssi is [1000;2000]. rssi should be in [0;1023];
+//     setRssiDirect(scaleRange(constrain(pwmRssi, PWM_RANGE_MIN, PWM_RANGE_MAX), PWM_RANGE_MIN, PWM_RANGE_MAX, 0, RSSI_MAX_VALUE), RSSI_SOURCE_RX_CHANNEL);
+// }
 
 static void updateRSSIADC(timeUs_t currentTimeUs)
 {
@@ -1046,3 +1151,269 @@ timeUs_t rxFrameTimeUs(void)
 {
     return rxRuntimeState.lastRcFrameTimeUs;
 }
+
+// ============================================================
+// 双接收机系统实现
+// ============================================================
+ 
+/**
+ * 初始化双接收机系统
+ * 检查配置并初始化主接收机和辅助接收机
+ */
+void rxMultiInstanceInit(const rxConfig_t *rxConfig)
+{
+    // 重置系统状态
+    memset(&rxMultiInstance, 0, sizeof(rxMultiInstance));
+    rxMultiInstance.activeInstanceCount = 0;
+    rxMultiInstance.primaryInstance = RX_INSTANCE_PRIMARY;
+    rxMultiInstance.auxiliaryInstance = RX_INSTANCE_AUXILIARY;
+    rxMultiInstance.auxiliaryRssiEnabled = false;
+    rxMultiInstance.initialized = false;
+    rxDualModeEnabled = false;
+    
+    // 检查是否启用双接收机模式
+    if (!rxConfig->rx_dual_mode) {
+        // 单接收机模式，使用传统初始化
+        return;
+    }
+    
+    // 查找主接收机串口配置
+    const serialPortConfig_t *primaryPortConfig = findSerialPortConfig(FUNCTION_RX_SERIAL);
+    // const serialPortConfig_t *primaryPortConfig = serialFindPortConfiguration(SERIAL_PORT_USART1);
+    if (primaryPortConfig) {
+        // 初始化主接收机实例
+        memset(&rxMultiInstance.rxRuntimeState[RX_INSTANCE_PRIMARY], 0, sizeof(rxRuntimeState_t));
+        rxMultiInstance.rxRuntimeState[RX_INSTANCE_PRIMARY].serialrxProvider = rxConfig->serialrx_provider;
+        rxMultiInstance.rxRuntimeState[RX_INSTANCE_PRIMARY].rxProvider = RX_PROVIDER_SERIAL;
+        
+        // 初始化函数指针
+        rxMultiInstance.rxRuntimeState[RX_INSTANCE_PRIMARY].rcReadRawFn = nullReadRawRC;
+        rxMultiInstance.rxRuntimeState[RX_INSTANCE_PRIMARY].rcFrameStatusFn = nullFrameStatus;
+        rxMultiInstance.rxRuntimeState[RX_INSTANCE_PRIMARY].rcProcessFrameFn = nullProcessFrame;
+        rxMultiInstance.rxRuntimeState[RX_INSTANCE_PRIMARY].lastRcFrameTimeUs = 0;
+        
+        // 尝试初始化串口接收机
+        bool primaryEnabled = false;
+        
+#ifdef USE_SERIALRX_CRSF
+        if (rxConfig->serialrx_provider == SERIALRX_CRSF) {
+            primaryEnabled = crsfRxInit(rxConfig, &rxMultiInstance.rxRuntimeState[RX_INSTANCE_PRIMARY]);
+        }
+#endif
+#ifdef USE_SERIALRX_FPORT
+        if (rxConfig->serialrx_provider == SERIALRX_FPORT) {
+            primaryEnabled = fportRxInit(rxConfig, &rxMultiInstance.rxRuntimeState[RX_INSTANCE_PRIMARY]);
+        }
+#endif
+#ifdef USE_SERIALRX_SB
+        if (rxConfig->serialrx_provider == SERIALRX_SBUS) {
+            primaryEnabled = sbusInit(rxConfig, &rxMultiInstance.rxRuntimeState[RX_INSTANCE_PRIMARY]);
+        }
+#endif
+#ifdef USE_SERIALRX_IBUS
+        if (rxConfig->serialrx_provider == SERIALRX_IBUS) {
+            primaryEnabled = ibusInit(rxConfig, &rxMultiInstance.rxRuntimeState[RX_INSTANCE_PRIMARY]);
+        }
+#endif
+#ifdef USE_SERIALRX_GHST
+        if (rxConfig->serialrx_provider == SERIALRX_GHST) {
+            primaryEnabled = ghstRxInit(rxConfig, &rxMultiInstance.rxRuntimeState[RX_INSTANCE_PRIMARY]);
+        }
+#endif
+#ifdef USE_SERIALRX_SRXL2
+        if (rxConfig->serialrx_provider == SERIALRX_SRXL2) {
+            primaryEnabled = srxl2RxInit(rxConfig, &rxMultiInstance.rxRuntimeState[RX_INSTANCE_PRIMARY]);
+        }
+#endif
+#ifdef USE_SERIALRX_MAVLINK
+        if (rxConfig->serialrx_provider == SERIALRX_MAVLINK) {
+            primaryEnabled = mavlinkRxInit(rxConfig, &rxMultiInstance.rxRuntimeState[RX_INSTANCE_PRIMARY]);
+        }
+#endif
+        
+        if (primaryEnabled) {
+            rxMultiInstance.activeInstanceCount++;
+            rxMultiInstance.primaryInstance = RX_INSTANCE_PRIMARY;
+        } else {
+            // 主接收机初始化失败，禁用双模式
+            return;
+        }
+    }
+    
+    // 查找辅助接收机串口配置
+    const serialPortConfig_t *auxPortConfig = findSerialPortConfig(FUNCTION_RX_SERIAL_AUX);
+    // const serialPortConfig_t *auxPortConfig = serialFindPortConfiguration(SERIAL_PORT_USART2);
+    
+    if (auxPortConfig && rxConfig->aux_serialrx_provider != 0) {
+        // 初始化辅助接收机实例
+        memset(&rxMultiInstance.rxRuntimeState[RX_INSTANCE_AUXILIARY], 0, sizeof(rxRuntimeState_t));
+        rxMultiInstance.rxRuntimeState[RX_INSTANCE_AUXILIARY].serialrxProvider = rxConfig->aux_serialrx_provider;
+        rxMultiInstance.rxRuntimeState[RX_INSTANCE_AUXILIARY].rxProvider = RX_PROVIDER_SERIAL;
+        
+        // 初始化函数指针
+        rxMultiInstance.rxRuntimeState[RX_INSTANCE_AUXILIARY].rcReadRawFn = nullReadRawRC;
+        rxMultiInstance.rxRuntimeState[RX_INSTANCE_AUXILIARY].rcFrameStatusFn = nullFrameStatus;
+        rxMultiInstance.rxRuntimeState[RX_INSTANCE_AUXILIARY].rcProcessFrameFn = nullProcessFrame;
+        rxMultiInstance.rxRuntimeState[RX_INSTANCE_AUXILIARY].lastRcFrameTimeUs = 0;
+        
+        // 创建临时配置结构用于初始化
+        rxConfig_t auxConfig = *rxConfig;
+        auxConfig.serialrx_provider = rxConfig->aux_serialrx_provider;
+        
+        // 尝试初始化辅助接收机
+        bool auxEnabled = false;
+        
+#ifdef USE_SERIALRX_CRSF
+        if (rxConfig->aux_serialrx_provider == SERIALRX_CRSF) {
+            auxEnabled = crsfRxInit2(&auxConfig, &rxMultiInstance.rxRuntimeState[RX_INSTANCE_AUXILIARY]);
+        }
+#endif
+#ifdef USE_SERIALRX_FPORT
+        if (rxConfig->aux_serialrx_provider == SERIALRX_FPORT) {
+            auxEnabled = fportRxInit(&auxConfig, &rxMultiInstance.rxRuntimeState[RX_INSTANCE_AUXILIARY]);
+        }
+#endif
+#ifdef USE_SERIALRX_SRXL2
+        if (rxConfig->aux_serialrx_provider == SERIALRX_SRXL2) {
+            auxEnabled = srxl2RxInit(&auxConfig, &rxMultiInstance.rxRuntimeState[RX_INSTANCE_AUXILIARY]);
+        }
+#endif
+#ifdef USE_SERIALRX_GHST
+        if (rxConfig->aux_serialrx_provider == SERIALRX_GHST) {
+            auxEnabled = ghstRxInit(&auxConfig, &rxMultiInstance.rxRuntimeState[RX_INSTANCE_AUXILIARY]);
+        }
+#endif
+        
+        if (auxEnabled) {
+            rxMultiInstance.activeInstanceCount++;
+            rxMultiInstance.auxiliaryInstance = RX_INSTANCE_AUXILIARY;
+            rxMultiInstance.auxiliaryRssiEnabled = true;
+            rxDualModeEnabled = true;
+            
+            // 复制主接收机的全局状态到全局变量（保持兼容性）
+            rxRuntimeState = rxMultiInstance.rxRuntimeState[RX_INSTANCE_PRIMARY];
+        }
+    }
+    
+    rxMultiInstance.initialized = true;
+}
+ 
+/**
+ * 处理指定接收机实例的帧
+ * @param instance 接收机实例
+ * @param currentTimeUs 当前时间（微秒）
+ * @return true 如果帧处理成功
+ */
+bool rxMultiInstanceProcessFrame(rxInstance_e instance)
+{
+    if (instance >= MAX_RX_INSTANCES || !rxMultiInstance.initialized) {
+        return false;
+    }
+    
+    rxRuntimeState_t *rxState = &rxMultiInstance.rxRuntimeState[instance];
+    
+    if (!rxState->rcFrameStatusFn) {
+        return false;
+    }
+    
+    uint8_t frameStatus = rxState->rcFrameStatusFn(rxState);
+    
+    if (frameStatus & RX_FRAME_COMPLETE) {
+        if (rxState->rcProcessFrameFn(rxState)) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+ 
+/**
+ * 设置主接收机实例
+ * 用于在两个接收机之间切换飞行控制权
+ */
+void rxMultiInstanceSetPrimaryInstance(rxInstance_e instance)
+{
+    if (instance < MAX_RX_INSTANCES && rxMultiInstance.initialized) {
+        rxMultiInstance.primaryInstance = instance;
+        
+        // 更新全局rxRuntimeState以保持兼容性
+        rxRuntimeState = rxMultiInstance.rxRuntimeState[instance];
+    }
+}
+ 
+/**
+ * 获取当前主接收机实例
+ */
+rxInstance_e rxMultiInstanceGetPrimaryInstance(void)
+{
+    return rxMultiInstance.primaryInstance;
+}
+ 
+/**
+ * 获取辅助RSSI数据指针
+ */
+auxiliaryRxRssi_t* rxGetAuxiliaryRssiData(void)
+{
+    return &auxRssiData;
+}
+ 
+/**
+ * 更新辅助RSSI数据
+ * 由协议层（如CRSF）在接收到Link Statistics时调用
+ * @param rssi1Dbm 天线1 RSSI (dBm)
+ * @param rssi2Dbm 天线2 RSSI (dBm)
+ * @param activeAntenna 当前活动天线 (0或1)
+ */
+void rxUpdateAuxiliaryRssi(int16_t rssi1Dbm, int16_t rssi2Dbm, uint8_t activeAntenna)
+{
+    auxRssiData.rssi1Dbm = rssi1Dbm;
+    auxRssiData.rssi2Dbm = rssi2Dbm;
+    auxRssiData.activeAntenna = activeAntenna;
+    auxRssiData.lastUpdateMs = millis();
+    auxRssiData.valid = true;
+}
+ 
+/**
+ * 检查双接收机模式是否启用
+ */
+bool rxIsDualModeEnabled(void)
+{
+    return rxDualModeEnabled;
+}
+ 
+/**
+ * 处理辅助接收机数据
+ * 在主循环中调用，用于更新辅助RX的RSSI数据
+ * @param currentTimeUs 当前时间（微秒）
+ */
+void rxProcessAuxiliaryReceiver(void)
+{
+    if (!rxDualModeEnabled || !rxMultiInstance.auxiliaryRssiEnabled) {
+        return;
+    }
+    
+    rxInstance_e auxInstance = rxMultiInstance.auxiliaryInstance;
+    rxMultiInstanceProcessFrame(auxInstance);
+    
+    // 检查辅助RX数据是否过期
+    // if (auxRssiData.valid && (millis() - auxRssiData.lastUpdateMs > 1000)) {
+    //     // 1秒无更新，标记为无效
+    //     auxRssiData.valid = false;
+    // }
+}
+ 
+/**
+ * 获取指定接收机实例的状态
+ * @param instance 接收机实例
+ * @return 接收机状态指针，如果实例无效则返回NULL
+ */
+rxRuntimeState_t* rxGetRuntimeState(rxInstance_e instance)
+{
+    if (instance >= MAX_RX_INSTANCES || !rxMultiInstance.initialized) {
+        return NULL;
+    }
+    
+    return &rxMultiInstance.rxRuntimeState[instance];
+}
+ 
+// ============================================================

@@ -447,7 +447,7 @@ void pgResetFn_osdElementConfig(osdElementConfig_t *osdElementConfig)
     for (int i = 0; i < OSD_ITEM_COUNT; i++) {
         osdElementConfig->item_pos[i] = OSD_POS((midCol - 5), midRow);
     }
-
+    osdElementConfig->item_pos[OSD_DUAL_RSSI_DBM] = OSD_POS(15, 1);
     // Always enable warnings elements by default
     uint16_t profileFlags = 0;
     for (unsigned i = 1; i <= OSD_PROFILE_COUNT; i++) {

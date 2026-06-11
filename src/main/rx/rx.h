@@ -228,3 +228,77 @@ void resumeRxSignal(void);
 timeDelta_t rxGetFrameDelta(timeDelta_t *frameAgeUs);
 
 timeUs_t rxFrameTimeUs(void);
+
+// ============================================================
+// 双接收机支持 - 双串口RX系统
+// ============================================================
+ 
+#define MAX_RX_INSTANCES 2
+ 
+// 接收机实例标识符
+typedef enum {
+    RX_INSTANCE_PRIMARY = 0,    // 主接收机（负责飞行控制）
+    RX_INSTANCE_AUXILIARY = 1,  // 辅助接收机（负责RSSI监控）
+} rxInstance_e;
+ 
+// 双接收机系统状态
+typedef struct rxMultiInstance_s {
+    rxRuntimeState_t rxRuntimeState[MAX_RX_INSTANCES];  // 两个接收机实例
+    uint8_t activeInstanceCount;                     // 活动实例数量 (0-2)
+    uint8_t primaryInstance;                        // 主接收机索引
+    uint8_t auxiliaryInstance;                       // 辅助接收机索引
+    bool auxiliaryRssiEnabled;                       // 是否启用辅助RSSI
+    bool initialized;                               // 系统是否已初始化
+} rxMultiInstance_t;
+ 
+// 辅助接收机RSSI数据结构
+typedef struct auxiliaryRxRssi_s {
+    int16_t rssi1Dbm;        // 天线1 RSSI (dBm, 范围: -130 ~ 0)
+    int16_t rssi2Dbm;        // 天线2 RSSI (dBm, 范围: -130 ~ 0)
+    uint8_t activeAntenna;     // 当前活动天线 (0=天线1, 1=天线2)
+    uint32_t lastUpdateMs;     // 最后更新时间戳 (millis)
+    bool valid;               // 数据是否有效
+    uint16_t linkQuality;     // 链路质量 (0-100)
+    int8_t snr;              // 信噪比 (dB)
+} auxiliaryRxRssi_t;
+ 
+// ============================================================
+// 全局变量声明
+// ============================================================
+ 
+extern rxMultiInstance_t rxMultiInstance;          // 双接收机系统状态
+extern auxiliaryRxRssi_t auxRssiData;            // 辅助RSSI数据
+extern bool rxDualModeEnabled;                    // 双接收机模式是否启用
+ 
+// ============================================================
+// 函数声明
+// ============================================================
+ 
+// 初始化双接收机系统
+void rxMultiInstanceInit(const rxConfig_t *rxConfig);
+ 
+// 处理指定接收机实例的帧
+bool rxMultiInstanceProcessFrame(rxInstance_e instance);
+ 
+// 设置主接收机实例
+void rxMultiInstanceSetPrimaryInstance(rxInstance_e instance);
+ 
+// 获取主接收机实例
+rxInstance_e rxMultiInstanceGetPrimaryInstance(void);
+ 
+// 获取辅助RSSI数据指针
+auxiliaryRxRssi_t* rxGetAuxiliaryRssiData(void);
+ 
+// 更新辅助RSSI数据（从协议层调用）
+void rxUpdateAuxiliaryRssi(int16_t rssi1Dbm, int16_t rssi2Dbm, uint8_t activeAntenna);
+ 
+// 检查双接收机模式是否启用
+bool rxIsDualModeEnabled(void);
+ 
+// 处理辅助接收机数据（主循环调用）
+void rxProcessAuxiliaryReceiver(void);
+ 
+// 获取指定接收机实例的状态
+rxRuntimeState_t* rxGetRuntimeState(rxInstance_e instance);
+ 
+// ============================================================

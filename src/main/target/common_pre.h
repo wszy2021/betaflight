@@ -184,7 +184,7 @@
 #define USE_SERIALRX_FPORT      // FrSky FPort
 #define USE_SERIALRX_XBUS       // JR
 #define USE_SERIALRX_SRXL2      // Spektrum SRXL2 protocol
-
+#define USE_DUAL_RX
 #endif // !defined(USE_SERIAL_RX)
 
 #if !defined(USE_TELEMETRY)

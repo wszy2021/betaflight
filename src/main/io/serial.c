@@ -139,7 +139,17 @@ void pgResetFn_serialConfig(serialConfig_t *serialConfig)
         serialConfig->portConfigs[i].gps_baudrateIndex = BAUD_57600;
         serialConfig->portConfigs[i].telemetry_baudrateIndex = BAUD_AUTO;
         serialConfig->portConfigs[i].blackbox_baudrateIndex = BAUD_115200;
+        if(serialConfig->portConfigs[i].identifier == SERIAL_PORT_USART2){
+            serialConfig->portConfigs[i].functionMask = FUNCTION_RX_SERIAL_AUX;
+        }
     }
+
+    // serialConfig->portConfigs[SERIAL_PORT_USART1].identifier = SERIAL_PORT_USART1;
+    // serialConfig->portConfigs[SERIAL_PORT_USART1].functionMask = FUNCTION_RX_SERIAL;
+    
+    
+    // serialConfig->portConfigs[SERIAL_PORT_USART2].identifier = SERIAL_PORT_USART2;
+    // serialConfig->portConfigs[SERIAL_PORT_USART2].functionMask = FUNCTION_RX_SERIAL_AUX;
 
     serialConfig->portConfigs[0].functionMask = FUNCTION_MSP;
 

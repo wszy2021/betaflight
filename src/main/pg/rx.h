@@ -32,6 +32,8 @@ typedef struct rxConfig_s {
     uint8_t serialrx_provider;                 // type of UART-based receiver (0 = spek 10, 1 = spek 11, 2 = sbus). Must be enabled by FEATURE_RX_SERIAL first.
     uint8_t serialrx_inverted;                 // invert the serial RX protocol compared to it's default setting
     uint8_t halfDuplex;                        // allow rx to operate in half duplex mode on F4, ignored for F1 and F3.
+    uint8_t rx_dual_mode;              // 双接收机模式开关 (0=关闭, 1=开启)
+    uint8_t aux_serialrx_provider;
     ioTag_t spektrum_bind_pin_override_ioTag;
     ioTag_t spektrum_bind_plug_ioTag;
     uint8_t spektrum_sat_bind;                 // number of bind pulses for Spektrum satellite receivers

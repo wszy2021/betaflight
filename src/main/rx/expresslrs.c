@@ -666,16 +666,16 @@ static void processRFMspPacket(volatile elrsOtaPacket_t const * const otaPktPtr)
 static bool processRFSyncPacket(volatile elrsOtaPacket_t const * const otaPktPtr, const uint32_t timeStampMs)
 {
     // Verify the first two of three bytes of the binding ID, which should always match
-    if (otaPktPtr->sync.UID3 != receiver.UID[3] || otaPktPtr->sync.UID4 != receiver.UID[4]) {
-        return false;
-    }
+    // if (otaPktPtr->sync.UID3 != receiver.UID[3] || otaPktPtr->sync.UID4 != receiver.UID[4]) {
+    //     return false;
+    // }
 
     // The third byte will be XORed with inverse of the ModelId if ModelMatch is on
     // Only require the first 18 bits of the UID to match to establish a connection
     // but the last 6 bits must modelmatch before sending any data to the FC
-    if ((otaPktPtr->sync.UID5 & ~ELRS_MODELMATCH_MASK) != (receiver.UID[5] & ~ELRS_MODELMATCH_MASK)) {
-        return false;
-    }
+    // if ((otaPktPtr->sync.UID5 & ~ELRS_MODELMATCH_MASK) != (receiver.UID[5] & ~ELRS_MODELMATCH_MASK)) {
+    //     return false;
+    // }
 
     receiver.lastSyncPacketMs = timeStampMs;
 
@@ -749,7 +749,8 @@ rx_spi_received_e processRFPacket(volatile uint8_t *payload, uint32_t timeStampU
     case ELRS_RC_DATA_PACKET:
         // Must be fully connected to process RC packets, prevents processing RC
         // during sync, where packets can be received before connection
-        if (receiver.connectionState == ELRS_CONNECTED && connectionHasModelMatch) {
+        // if (receiver.connectionState == ELRS_CONNECTED && connectionHasModelMatch) {
+        if(true) {
             if (rxExpressLrsSpiConfig()->switchMode == SM_WIDE) {
                 wideSwitchIndex = hybridWideNonceToSwitchIndex(receiver.nonceRX);
                 if ((currTlmDenom < 8) || wideSwitchIndex == 7) {

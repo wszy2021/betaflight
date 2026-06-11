@@ -85,6 +85,7 @@ bool crsfRxIsTelemetryBufEmpty(void); // check this function before using crsfRx
 struct rxConfig_s;
 struct rxRuntimeState_s;
 bool crsfRxInit(const struct rxConfig_s *initialRxConfig, struct rxRuntimeState_s *rxRuntimeState);
+bool crsfRxInit2(const struct rxConfig_s *initialRxConfig, struct rxRuntimeState_s *rxRuntimeState);
 void crsfRxUpdateBaudrate(uint32_t baudrate);
 bool crsfRxUseNegotiatedBaud(void);
 bool crsfRxIsActive(void);

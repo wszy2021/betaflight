@@ -81,6 +81,8 @@ void pgResetFn_rxConfig(rxConfig_t *rxConfig)
 {
     RESET_CONFIG_2(rxConfig_t, rxConfig,
         .halfDuplex = SERIALRX_HALFDUPLEX,
+        .rx_dual_mode = 1,
+        .aux_serialrx_provider = SERIALRX_PROVIDER,
         .serialrx_provider = SERIALRX_PROVIDER,
         .serialrx_inverted = 0,
         .spektrum_bind_pin_override_ioTag = IO_TAG(SPEKTRUM_BIND_PIN),
