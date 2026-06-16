@@ -163,6 +163,7 @@
 #include "pg/motor.h"
 #include "pg/stats.h"
 
+#include "rx/crsf.h"
 #include "rx/rx.h"
 
 #include "sensors/adcinternal.h"
@@ -1554,105 +1555,160 @@ static void osdElementRtcTime(osdElementParms_t *element)
 #endif // USE_RTC_TIME
 
 #ifdef USE_RX_RSSI_DBM
+
+#define AUX_RSSI_BAND_15G 0
+#define AUX_RSSI_BAND_24G 1
+
+#define OSD_AUX_RSSI_SWITCH_HI 1750
+#define OSD_AUX_RSSI_SWITCH_LO 1250
+
+static int16_t osdAuxMaxRssiDbm(const auxiliaryRxRssi_t *rssiData)
+{
+    if (!rssiData || !rssiData->valid) {
+        return CRSF_RSSI_MIN;
+    }
+
+    return MAX(rssiData->rssi1Dbm, rssiData->rssi2Dbm);
+}
+
+static void osdFormatAuxRssiValue(char *dest, const auxiliaryRxRssi_t *rssiData, int16_t rssiDbm)
+{
+    if (!rssiData || !rssiData->valid) {
+        tfp_sprintf(dest, "---");
+    } else {
+        tfp_sprintf(dest, "%3d", -(int)rssiDbm);
+    }
+}
+
+// osd_aux_channel: switch high = 2.4G detail, switch low = 1.5G detail
+static uint8_t osdGetSelectedAuxRssiBand(void)
+{
+    static uint8_t selectedBand = AUX_RSSI_BAND_24G;
+    const uint8_t auxChannel = osdConfig()->aux_channel + NON_AUX_CHANNEL_COUNT - 1;
+
+    if (auxChannel < MAX_SUPPORTED_RC_CHANNEL_COUNT) {
+        const uint16_t channelValue = constrain((uint16_t)rcData[auxChannel], PWM_RANGE_MIN, PWM_RANGE_MAX - 1);
+
+        if (channelValue > OSD_AUX_RSSI_SWITCH_HI) {
+            selectedBand = AUX_RSSI_BAND_24G;
+        } else if (channelValue < OSD_AUX_RSSI_SWITCH_LO) {
+            selectedBand = AUX_RSSI_BAND_15G;
+        }
+    }
+
+    return selectedBand;
+}
+
+static void osdElementAuxRssiPanel(osdElementParms_t *element)
+{
+    char line[OSD_ELEMENT_BUFFER_LENGTH];
+    const uint8_t x = element->elemPosX;
+    const uint8_t y = element->elemPosY;
+    uint8_t attr = DISPLAYPORT_SEVERITY_NORMAL;
+
+    auxiliaryRxRssi_t *aux15g = rxGetAuxiliaryRssiData(AUX_RSSI_BAND_15G);
+    auxiliaryRxRssi_t *aux24g = rxGetAuxiliaryRssiData(AUX_RSSI_BAND_24G);
+    const uint8_t selectedBand = osdGetSelectedAuxRssiBand();
+    auxiliaryRxRssi_t *selectedAux = rxGetAuxiliaryRssiData(selectedBand);
+
+    if (selectedAux && selectedAux->valid) {
+        const int16_t activeRssi = selectedAux->activeAntenna ? selectedAux->rssi2Dbm : selectedAux->rssi1Dbm;
+        if (activeRssi < osdConfig()->rssi_dbm_alarm) {
+            attr = DISPLAYPORT_SEVERITY_CRITICAL;
+            element->attr = attr;
+        }
+    }
+
+    osdDisplayWrite(element, x, y, attr, "1.5G  2.4G");
+
+    char max15g[4];
+    char max24g[4];
+    osdFormatAuxRssiValue(max15g, aux15g, osdAuxMaxRssiDbm(aux15g));
+    osdFormatAuxRssiValue(max24g, aux24g, osdAuxMaxRssiDbm(aux24g));
+    tfp_sprintf(line, "%s  %s", max15g, max24g);
+    osdDisplayWrite(element, x, y + 1, attr, line);
+
+    if (!selectedAux || !selectedAux->valid) {
+        tfp_sprintf(line, "   ---   ");
+    } else {
+        const int16_t rssi1 = selectedAux->rssi1Dbm;
+        const int16_t rssi2 = selectedAux->rssi2Dbm;
+        const int8_t diff = 0;
+
+        // if (rssi1 > rssi2) {
+        //     tfp_sprintf(line, "<<< %c    ", SYM_ARROW_NORTH);
+        // } else if (rssi1 < rssi2) {
+        //     tfp_sprintf(line, "    %c >>>", SYM_ARROW_NORTH);
+        // } else {
+        //     tfp_sprintf(line, "   %c    ", SYM_ARROW_NORTH);
+        // }
+        if((rssi1 - 13) > rssi2)
+            tfp_sprintf(line, " <<<<<       ");
+        else if((rssi1 - 10) > rssi2)
+            tfp_sprintf(line, " <<<<        ");
+        else if((rssi1 - 7) > rssi2)
+            tfp_sprintf(line, "  <<<        ");
+        else if((rssi1 - 5) > rssi2)
+            tfp_sprintf(line, "   <<        ");
+        else if((rssi1 - 3) > rssi2)
+            tfp_sprintf(line, "    <        ");
+        else if((rssi2 - 13) > rssi1)
+            tfp_sprintf(line, "       >>>>> ");
+        else if((rssi2 - 10) > rssi1)
+            tfp_sprintf(line, "        >>>> ");
+        else if((rssi2 - 7) > rssi1)
+            tfp_sprintf(line, "        >>>  ");
+        else if((rssi2 - 5) > rssi1)
+            tfp_sprintf(line, "        >>   ");
+        else if((rssi2 - 3) > rssi1)
+            tfp_sprintf(line, "        >    ");
+        else
+            diff = 1;
+
+        osdDisplayWrite(element, x, y + 2, attr, line);
+        if(diff == 1){
+            tfp_sprintf(line, "     🡹      ");
+            osdDisplayWrite(element, x + 1, y + 3, attr, line);
+        }
+    }
+    
+    tfp_sprintf(line, "[%s]", selectedBand == AUX_RSSI_BAND_24G ? "2.4G" : "1.5G");
+    osdDisplayWrite(element, x + 1, y + 4, attr, line);
+
+    if (!selectedAux || !selectedAux->valid) {
+        tfp_sprintf(line, "--- <-> ---");
+    } else {
+        char rssiLeft[4];
+        char rssiRight[4];
+        osdFormatAuxRssiValue(rssiLeft, selectedAux, selectedAux->rssi1Dbm);
+        osdFormatAuxRssiValue(rssiRight, selectedAux, selectedAux->rssi2Dbm);
+        tfp_sprintf(line, "%s <-> %s", rssiLeft, rssiRight);
+    }
+    osdDisplayWrite(element, x, y + 5, attr, line);
+
+    element->drawElement = false;
+}
+
 static void osdElementRssiDbm(osdElementParms_t *element)
 {
     const int16_t osdRssiDbm = getRssiDbm();
-    auxiliaryRxRssi_t *rssiData = rxGetAuxiliaryRssiData(0);
-    if(rssiData){
-        int16_t rssi1 = rssiData->rssi1Dbm;
-        int16_t rssi2 = rssiData->rssi2Dbm;
-        // tfp_sprintf(element->buff, "%c%3d*%3d", SYM_RSSI, rssi1,rssi2);
-    if((rssi1 - 13) > rssi2)
-        tfp_sprintf(element->buff, "<<<<< %3d      ", rssi1);
-    else if((rssi1 - 10) > rssi2)
-        tfp_sprintf(element->buff, " <<<< %3d      ", rssi1);
-    else if((rssi1 - 7) > rssi2)
-        tfp_sprintf(element->buff, "  <<< %3d      ", rssi1);
-    else if((rssi1 - 5) > rssi2)
-        tfp_sprintf(element->buff, "   << %3d      ", rssi1);
-    else if((rssi1 - 3) > rssi2)
-        tfp_sprintf(element->buff, "    < %3d      ", rssi1);
-    else if((rssi2 - 13) > rssi1)
-        tfp_sprintf(element->buff, "      %3d >>>>>", rssi2);
-    else if((rssi2 - 10) > rssi1)
-        tfp_sprintf(element->buff, "      %3d >>>> ", rssi2);
-    else if((rssi2 - 7) > rssi1)
-        tfp_sprintf(element->buff, "      %3d >>>  ", rssi2);
-    else if((rssi2 - 5) > rssi1)
-        tfp_sprintf(element->buff, "      %3d >>   ", rssi2);
-    else if((rssi2 - 3) > rssi1)
-        tfp_sprintf(element->buff, "      %3d >    ", rssi2);
-    else
-        tfp_sprintf(element->buff, "      %3d      ", rssi1);
-    }else{
-        tfp_sprintf(element->buff, "%c%3d*", SYM_RSSI, osdRssiDbm);
-    }
-    // tfp_sprintf(element->buff, "%c%3d", SYM_RSSI, osdRssiDbm);
 
-    // if (osdRssiDbm < osdConfig()->rssi_dbm_alarm) {
-    //     element->attr = DISPLAYPORT_SEVERITY_CRITICAL;
-    // }
-}
+    tfp_sprintf(element->buff, "%c%3d", SYM_RSSI, osdRssiDbm);
 
-static void osdElementAuxRssiDbm(osdElementParms_t *element, uint8_t auxIndex)
-{
-    auxiliaryRxRssi_t *rssiData = rxGetAuxiliaryRssiData(auxIndex);
-
-    const char rxLabel = '1' + auxIndex;
-
-    if (!rssiData || !rssiData->valid) {
-        tfp_sprintf(element->buff, "%c%c --- ---", SYM_RSSI, rxLabel);
-        return;
-    }
-
-    const int16_t rssi1 = rssiData->rssi1Dbm;
-    const int16_t rssi2 = rssiData->rssi2Dbm;
-
-    // dBm 数值越大信号越强，用 > / < 表示该接收机两天线 RSSI 大小关系
-    if (rssi1 > rssi2) {
-        tfp_sprintf(element->buff, "%c%c%3d>%3d", SYM_RSSI, rxLabel, rssi1, rssi2);
-    } else if (rssi1 < rssi2) {
-        tfp_sprintf(element->buff, "%c%c%3d<%3d", SYM_RSSI, rxLabel, rssi1, rssi2);
-    } else {
-        tfp_sprintf(element->buff, "%c%c%3d=%3d", SYM_RSSI, rxLabel, rssi1, rssi2);
-    }
-    // if((rssi1 - 13) > rssi2)
-    //     tfp_sprintf(element->buff, "%3d <<<<< %3d      ", rssi1,rssi2);
-    // else if((rssi1 - 10) > rssi2)
-    //     tfp_sprintf(element->buff, "%3d <<<<  %3d      ", rssi1,rssi2);
-    // else if((rssi1 - 7) > rssi2)
-    //     tfp_sprintf(element->buff, "%3d  <<<  %3d      ", rssi1,rssi2);
-    // else if((rssi1 - 5) > rssi2)
-    //     tfp_sprintf(element->buff, "%3d   <<  %3d      ", rssi1,rssi2);
-    // else if((rssi1 - 3) > rssi2)
-    //     tfp_sprintf(element->buff, "%3d    <  %3d      ", rssi1,rssi2);
-    // else if((rssi2 - 13) > rssi1)
-    //     tfp_sprintf(element->buff, "      %3d >>>>> %3d", rssi1,rssi2);
-    // else if((rssi2 - 10) > rssi1)
-    //     tfp_sprintf(element->buff, "      %3d  >>>> %3d", rssi1,rssi2);
-    // else if((rssi2 - 7) > rssi1)
-    //     tfp_sprintf(element->buff, "      %3d  >>>  %3d", rssi1,rssi2);
-    // else if((rssi2 - 5) > rssi1)
-    //     tfp_sprintf(element->buff, "      %3d  >>   %3d", rssi1,rssi2);
-    // else if((rssi2 - 3) > rssi1)
-    //     tfp_sprintf(element->buff, "      %3d  >    %3d", rssi1,rssi2);
-    // else
-    //     tfp_sprintf(element->buff, "  %3d   ==   %3d  ", rssi1,rssi2);
-
-    const int16_t activeRssi = rssiData->activeAntenna ? rssi2 : rssi1;
-    if (activeRssi < osdConfig()->rssi_dbm_alarm) {
+    if (osdRssiDbm < osdConfig()->rssi_dbm_alarm) {
         element->attr = DISPLAYPORT_SEVERITY_CRITICAL;
     }
 }
 
 static void osdElementDualRssiDbm(osdElementParms_t *element)
 {
-    osdElementAuxRssiDbm(element, 0);
+    osdElementAuxRssiPanel(element);
 }
 
 static void osdElementAux2RssiDbm(osdElementParms_t *element)
 {
-    osdElementAuxRssiDbm(element, 1);
+    UNUSED(element);
+    element->drawElement = false;
 }
 
 #endif // USE_RX_RSSI_DBM
