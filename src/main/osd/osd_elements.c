@@ -1576,7 +1576,7 @@ static void osdFormatAuxRssiValue(char *dest, const auxiliaryRxRssi_t *rssiData,
     if (!rssiData || !rssiData->valid) {
         tfp_sprintf(dest, "---");
     } else {
-        tfp_sprintf(dest, "%3d", -(int)rssiDbm);
+        tfp_sprintf(dest, "%3d", 130 + (int)rssiDbm);
     }
 }
 
