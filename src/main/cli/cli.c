@@ -172,6 +172,7 @@ bool cliMode = false;
 #include "telemetry/frsky_hub.h"
 #include "telemetry/telemetry.h"
 
+#include "follow/follow_bundle.h"
 #include "cli.h"
 
 static serialPort_t *cliPort = NULL;
@@ -6322,6 +6323,7 @@ static void printConfig(const char *cmdName, char *cmdline, bool doDiff)
             dumpAllValues(cmdName, HARDWARE_VALUE, dumpMask, "master");
         } else {
             dumpAllValues(cmdName, MASTER_VALUE, dumpMask, "master");
+            followCliDumpPidProfiles(dumpMask & BARE, dumpMask & DO_DIFF, dumpMask & HARDWARE_ONLY);
 
             if (dumpMask & DUMP_ALL) {
                 for (uint32_t pidProfileIndex = 0; pidProfileIndex < PID_PROFILE_COUNT; pidProfileIndex++) {
@@ -6447,6 +6449,59 @@ typedef struct {
 }
 #endif
 
+static void cliFollowPid(const char *cmdName, char *cmdline)
+{
+    char *saveptr = NULL;
+    char *subcommand = strtok_r(cmdline, " ", &saveptr);
+
+    if (!subcommand) {
+        cliPrintLinef("followPID get <index>");
+        cliPrintLinef("followPID set <index> <28 floats>");
+        cliPrintLinef("followPID save");
+        return;
+    }
+
+    if (!strcasecmp(subcommand, "save")) {
+        if (tryPrepareSave(cmdName)) {
+            saveConfigAndNotify();
+            cliPrintLine("followPID saved");
+        }
+        return;
+    }
+
+    char *indexToken = strtok_r(NULL, " ", &saveptr);
+    if (!indexToken) {
+        cliShowInvalidArgumentCountError(cmdName);
+        return;
+    }
+
+    const int index = atoi(indexToken);
+    if (index < 0 || index >= 6) {
+        cliShowArgumentRangeError(cmdName, "INDEX", 0, 5);
+        return;
+    }
+
+    if (!strcasecmp(subcommand, "get")) {
+        if (!followCliPrintPidProfile((uint8_t)index)) {
+            cliPrintErrorLinef(cmdName, "FAILED TO READ PROFILE");
+            return;
+        }
+        return;
+    }
+
+    if (!strcasecmp(subcommand, "set")) {
+        if (!followCliSetPidProfileString((uint8_t)index, saveptr)) {
+            cliPrintErrorLinef(cmdName, "FAILED TO WRITE PROFILE");
+            return;
+        }
+
+        cliPrintLinef("followPID set %d OK", index);
+        return;
+    }
+
+    cliPrintErrorLinef(cmdName, "INVALID SUBCOMMAND");
+}
+
 static void cliHelp(const char *cmdName, char *cmdline);
 
 // should be sorted a..z for bsearch()
@@ -6517,6 +6572,7 @@ const clicmd_t cmdTable[] = {
     CLI_COMMAND_DEF("flash_write", NULL, "<address> <message>", cliFlashWrite),
 #endif
 #endif
+    CLI_COMMAND_DEF("followPID", "get/set follow PID profile", "get <index> | set <index> <float...>", cliFollowPid),
     CLI_COMMAND_DEF("get", "get variable value", "[name]", cliGet),
 #ifdef USE_GPS
     CLI_COMMAND_DEF("gpspassthrough", "passthrough gps to serial", NULL, cliGpsPassthrough),

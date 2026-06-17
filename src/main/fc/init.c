@@ -171,6 +171,7 @@
 #include "sensors/initialisation.h"
 
 #include "telemetry/telemetry.h"
+#include "follow/follow_bundle.h"
 
 #ifdef USE_HARDWARE_REVISION_DETECTION
 #include "hardware_revision.h"
@@ -823,7 +824,6 @@ void init(void)
         accStartCalibration();
     }
 #endif
-    gyroStartCalibration(false);
 #ifdef USE_BARO
     baroStartCalibration();
 #endif
@@ -1002,6 +1002,8 @@ void init(void)
     debugInit();
 
     unusedPinsInit();
+
+    followTrackerInit();
 
     tasksInit();
 

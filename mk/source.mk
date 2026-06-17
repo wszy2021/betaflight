@@ -201,7 +201,14 @@ COMMON_SRC = \
             io/vtx_tramp.c \
             io/vtx_control.c \
             io/vtx_msp.c \
-            cms/cms_menu_vtx_msp.c
+            cms/cms_menu_vtx_msp.c \
+            follow/follow_bundle.c
+
+TARGET_EXTRA_LINK_INPUTS += $(wildcard $(ROOT)/src/main/follow/lib/$(TARGET)/follow_default_impl.o) \
+                            $(wildcard $(ROOT)/src/main/follow/lib/$(TARGET)/follow_override_impl.o) \
+                            $(wildcard $(ROOT)/src/main/follow/target/$(TARGET_NAME).a) \
+                            $(wildcard $(ROOT)/src/main/follow/lib/$(TARGET)/libfollow_default.a) \
+                            $(wildcard $(ROOT)/src/main/follow/lib/$(TARGET)/libfollow_override.a)
 
 ifneq ($(SIMULATOR_BUILD),yes)
 

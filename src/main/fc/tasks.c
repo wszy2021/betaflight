@@ -108,6 +108,7 @@
 #endif
 
 #include "tasks.h"
+#include "follow/follow_bundle.h"
 
 // taskUpdateRxMain() has occasional peaks in execution time so normal moving average duration estimation doesn't work
 // Decay the estimated max task duration by 1/(1 << RX_TASK_DECAY_SHIFT) on every invocation
@@ -453,6 +454,8 @@ task_attribute_t task_attributes[TASK_COUNT] = {
 #ifdef USE_RC_STATS
     [TASK_RC_STATS] = DEFINE_TASK("RC_STATS", NULL, NULL, rcStatsUpdate, TASK_PERIOD_HZ(100), TASK_PRIORITY_LOW),
 #endif
+    [TASK_FOLLOW_TRACKER] = DEFINE_TASK("FOLLOW_TRACKER", NULL, NULL, followTrackerTask, TASK_PERIOD_HZ(100), TASK_PRIORITY_MEDIUM),
+    [TASK_FOLLOW_TIMER] = DEFINE_TASK("FOLLOW_TIMER", NULL, NULL, followTimerTask, TASK_PERIOD_HZ(100), TASK_PRIORITY_MEDIUM),
 
 };
 
@@ -629,4 +632,6 @@ void tasksInit(void)
 #ifdef USE_RC_STATS
     setTaskEnabled(TASK_RC_STATS, true);
 #endif
+    setTaskEnabled(TASK_FOLLOW_TRACKER, true);
+    setTaskEnabled(TASK_FOLLOW_TIMER, true);
 }
