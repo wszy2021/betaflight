@@ -680,6 +680,10 @@ const clivalue_t valueTable[] = {
     { "gyro_calib_duration",        VAR_UINT16 | MASTER_VALUE, .config.minmaxUnsigned = { 50,  3000 }, PG_GYRO_CONFIG, offsetof(gyroConfig_t, gyroCalibrationDuration) },
     { "gyro_calib_noise_limit",     VAR_UINT8  | MASTER_VALUE, .config.minmaxUnsigned = { 0,  200 }, PG_GYRO_CONFIG, offsetof(gyroConfig_t, gyroMovementCalibrationThreshold) },
     { "gyro_offset_yaw",            VAR_INT16  | MASTER_VALUE, .config.minmax = { -1000, 1000 }, PG_GYRO_CONFIG, offsetof(gyroConfig_t, gyro_offset_yaw) },
+    { "gyro_1_calibration",         VAR_INT32  | MASTER_VALUE | MODE_ARRAY, .config.array.length = GYRO_CALIBRATION_CONFIG_VALUE_COUNT, PG_GYRO_CONFIG, offsetof(gyroConfig_t, gyroCalibration) },
+#ifdef USE_MULTI_GYRO
+    { "gyro_2_calibration",         VAR_INT32  | MASTER_VALUE | MODE_ARRAY, .config.array.length = GYRO_CALIBRATION_CONFIG_VALUE_COUNT, PG_GYRO_CONFIG, offsetof(gyroConfig_t, gyroCalibration) + sizeof(gyroCalibrationConfig_t) },
+#endif
 #ifdef USE_GYRO_OVERFLOW_CHECK
     { "gyro_overflow_detect",       VAR_UINT8  | MASTER_VALUE | MODE_LOOKUP, .config.lookup = { TABLE_GYRO_OVERFLOW_CHECK }, PG_GYRO_CONFIG, offsetof(gyroConfig_t, checkOverflow) },
 #endif

@@ -746,13 +746,18 @@ static bool mspCommonProcessOutCommand(int16_t cmdMSP, sbuf_t *dst, mspPostProce
         break;
     }
 
-    case MSP_BUILD_INFO:
+    case MSP_BUILD_INFO: {
         sbufWriteData(dst, buildDate, BUILD_DATE_LENGTH);
         sbufWriteData(dst, buildTime, BUILD_TIME_LENGTH);
-        sbufWriteData(dst, shortGitRevision, GIT_SHORT_REVISION_LENGTH);
+        char shortGitRevisionOutput[GIT_SHORT_REVISION_LENGTH] = { 0 };
+        for (int i = 0; i < GIT_SHORT_REVISION_LENGTH && shortGitRevision[i]; i++) {
+            shortGitRevisionOutput[i] = shortGitRevision[i];
+        }
+        sbufWriteData(dst, shortGitRevisionOutput, sizeof(shortGitRevisionOutput));
         // Added in API version 1.46
         sbufWriteBuildInfoFlags(dst);
         break;
+    }
 
     case MSP_ANALOG:
         sbufWriteU8(dst, (uint8_t)constrain(getLegacyBatteryVoltage(), 0, 255));
