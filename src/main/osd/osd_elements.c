@@ -1633,7 +1633,7 @@ static void osdElementAuxRssiPanel(osdElementParms_t *element)
     } else {
         const int16_t rssi1 = selectedAux->rssi1Dbm;
         const int16_t rssi2 = selectedAux->rssi2Dbm;
-        const int8_t diff = 0;
+        int8_t diff = 0;
 
         // if (rssi1 > rssi2) {
         //     tfp_sprintf(line, "<<< %c    ", SYM_ARROW_NORTH);
@@ -1643,32 +1643,34 @@ static void osdElementAuxRssiPanel(osdElementParms_t *element)
         //     tfp_sprintf(line, "   %c    ", SYM_ARROW_NORTH);
         // }
         if((rssi1 - 13) > rssi2)
-            tfp_sprintf(line, " <<<<<       ");
+            tfp_sprintf(line, " <<<<<      ");
         else if((rssi1 - 10) > rssi2)
-            tfp_sprintf(line, " <<<<        ");
+            tfp_sprintf(line, " <<<<       ");
         else if((rssi1 - 7) > rssi2)
-            tfp_sprintf(line, "  <<<        ");
+            tfp_sprintf(line, "  <<<       ");
         else if((rssi1 - 5) > rssi2)
-            tfp_sprintf(line, "   <<        ");
+            tfp_sprintf(line, "   <<       ");
         else if((rssi1 - 3) > rssi2)
-            tfp_sprintf(line, "    <        ");
+            tfp_sprintf(line, "    <       ");
         else if((rssi2 - 13) > rssi1)
-            tfp_sprintf(line, "       >>>>> ");
+            tfp_sprintf(line, "      >>>>> ");
         else if((rssi2 - 10) > rssi1)
-            tfp_sprintf(line, "        >>>> ");
+            tfp_sprintf(line, "       >>>> ");
         else if((rssi2 - 7) > rssi1)
-            tfp_sprintf(line, "        >>>  ");
+            tfp_sprintf(line, "       >>>  ");
         else if((rssi2 - 5) > rssi1)
-            tfp_sprintf(line, "        >>   ");
+            tfp_sprintf(line, "       >>   ");
         else if((rssi2 - 3) > rssi1)
-            tfp_sprintf(line, "        >    ");
-        else
+            tfp_sprintf(line, "       >    ");
+        else{
             diff = 1;
+            tfp_sprintf(line, "    ^     ");
+        }
 
         osdDisplayWrite(element, x, y + 2, attr, line);
         if(diff == 1){
-            tfp_sprintf(line, "     🡹      ");
-            osdDisplayWrite(element, x + 1, y + 3, attr, line);
+            tfp_sprintf(line, "    ^     ");
+            osdDisplayWrite(element, x, y + 3, attr, line);
         }
     }
     
@@ -1676,7 +1678,7 @@ static void osdElementAuxRssiPanel(osdElementParms_t *element)
     osdDisplayWrite(element, x + 1, y + 4, attr, line);
 
     if (!selectedAux || !selectedAux->valid) {
-        tfp_sprintf(line, "--- <-> ---");
+        tfp_sprintf(line, "-- <-> --");
     } else {
         char rssiLeft[4];
         char rssiRight[4];
