@@ -1619,13 +1619,13 @@ static void osdElementAuxRssiPanel(osdElementParms_t *element)
         }
     }
 
-    osdDisplayWrite(element, x, y, attr, "1.5G  2.4G");
+    osdDisplayWrite(element, x, y, attr, "1.5G       2.4G");
 
     char max15g[4];
     char max24g[4];
     osdFormatAuxRssiValue(max15g, aux15g, osdAuxMaxRssiDbm(aux15g));
     osdFormatAuxRssiValue(max24g, aux24g, osdAuxMaxRssiDbm(aux24g));
-    tfp_sprintf(line, "%s  %s", max15g, max24g);
+    tfp_sprintf(line, "%s        %s", max15g, max24g);
     osdDisplayWrite(element, x, y + 1, attr, line);
 
     if (!selectedAux || !selectedAux->valid) {
@@ -1667,15 +1667,15 @@ static void osdElementAuxRssiPanel(osdElementParms_t *element)
             tfp_sprintf(line, "    ^     ");
         }
 
-        osdDisplayWrite(element, x, y + 2, attr, line);
+        osdDisplayWrite(element, x+3, y + 5, attr, line);
         if(diff == 1){
             tfp_sprintf(line, "    ^     ");
-            osdDisplayWrite(element, x, y + 3, attr, line);
+            osdDisplayWrite(element, x+3, y + 6, attr, line);
         }
     }
     
     tfp_sprintf(line, "[%s]", selectedBand == AUX_RSSI_BAND_24G ? "2.4G" : "1.5G");
-    osdDisplayWrite(element, x + 1, y + 4, attr, line);
+    osdDisplayWrite(element, x + 5, y + 9, attr, line);
 
     if (!selectedAux || !selectedAux->valid) {
         tfp_sprintf(line, "-- <-> --");
@@ -1684,9 +1684,9 @@ static void osdElementAuxRssiPanel(osdElementParms_t *element)
         char rssiRight[4];
         osdFormatAuxRssiValue(rssiLeft, selectedAux, selectedAux->rssi1Dbm);
         osdFormatAuxRssiValue(rssiRight, selectedAux, selectedAux->rssi2Dbm);
-        tfp_sprintf(line, "%s <-> %s", rssiLeft, rssiRight);
+        tfp_sprintf(line, "%s <->%s", rssiLeft, rssiRight);
     }
-    osdDisplayWrite(element, x, y + 5, attr, line);
+    osdDisplayWrite(element, x+2, y + 10, attr, line);
 
     element->drawElement = false;
 }
