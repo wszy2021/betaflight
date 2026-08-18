@@ -115,6 +115,54 @@ STATIC_ASSERT((sizeof(blackboxConfig()->fields_disabled_mask) * 8) >= FLIGHT_LOG
 #define UNSIGNED FLIGHT_LOG_FIELD_UNSIGNED
 #define SIGNED FLIGHT_LOG_FIELD_SIGNED
 
+#define BLACKBOX_DEBUG_FIELD_LIST(X) \
+    X(0)  \
+    X(1)  \
+    X(2)  \
+    X(3)  \
+    X(4)  \
+    X(5)  \
+    X(6)  \
+    X(7)  \
+    X(8)  \
+    X(9)  \
+    X(10) \
+    X(11) \
+    X(12) \
+    X(13) \
+    X(14) \
+    X(15) \
+    X(16) \
+    X(17) \
+    X(18) \
+    X(19) \
+    X(20) \
+    X(21) \
+    X(22) \
+    X(23) \
+    X(24) \
+    X(25) \
+    X(26) \
+    X(27) \
+    X(28) \
+    X(29) \
+    X(30) \
+    X(31) \
+    X(32) \
+    X(33) \
+    X(34) \
+    X(35) \
+    X(36) \
+    X(37)
+
+#define BLACKBOX_COUNT_DEBUG_FIELD(index) + 1
+enum {
+    BLACKBOX_DEBUG_FIELD_COUNT = 0 BLACKBOX_DEBUG_FIELD_LIST(BLACKBOX_COUNT_DEBUG_FIELD)
+};
+#undef BLACKBOX_COUNT_DEBUG_FIELD
+
+STATIC_ASSERT(BLACKBOX_DEBUG_FIELD_COUNT == DEBUG16_VALUE_COUNT, blackbox_debug_field_count_mismatch);
+
 static const char blackboxHeader[] =
     "H Product:Blackbox flight data recorder by Nicholas Sherlock\n"
     "H Data version:2\n";
@@ -235,14 +283,11 @@ static const blackboxDeltaFieldDefinition_t blackboxMainFields[] = {
     {"accSmooth",   0, SIGNED,   .Ipredict = PREDICT(0),       .Iencode = ENCODING(SIGNED_VB),   .Ppredict = PREDICT(AVERAGE_2),     .Pencode = ENCODING(SIGNED_VB), CONDITION(ACC)},
     {"accSmooth",   1, SIGNED,   .Ipredict = PREDICT(0),       .Iencode = ENCODING(SIGNED_VB),   .Ppredict = PREDICT(AVERAGE_2),     .Pencode = ENCODING(SIGNED_VB), CONDITION(ACC)},
     {"accSmooth",   2, SIGNED,   .Ipredict = PREDICT(0),       .Iencode = ENCODING(SIGNED_VB),   .Ppredict = PREDICT(AVERAGE_2),     .Pencode = ENCODING(SIGNED_VB), CONDITION(ACC)},
-    {"debug",       0, SIGNED,   .Ipredict = PREDICT(0),       .Iencode = ENCODING(SIGNED_VB),   .Ppredict = PREDICT(AVERAGE_2),     .Pencode = ENCODING(SIGNED_VB), CONDITION(DEBUG_LOG)},
-    {"debug",       1, SIGNED,   .Ipredict = PREDICT(0),       .Iencode = ENCODING(SIGNED_VB),   .Ppredict = PREDICT(AVERAGE_2),     .Pencode = ENCODING(SIGNED_VB), CONDITION(DEBUG_LOG)},
-    {"debug",       2, SIGNED,   .Ipredict = PREDICT(0),       .Iencode = ENCODING(SIGNED_VB),   .Ppredict = PREDICT(AVERAGE_2),     .Pencode = ENCODING(SIGNED_VB), CONDITION(DEBUG_LOG)},
-    {"debug",       3, SIGNED,   .Ipredict = PREDICT(0),       .Iencode = ENCODING(SIGNED_VB),   .Ppredict = PREDICT(AVERAGE_2),     .Pencode = ENCODING(SIGNED_VB), CONDITION(DEBUG_LOG)},
-    {"debug",       4, SIGNED,   .Ipredict = PREDICT(0),       .Iencode = ENCODING(SIGNED_VB),   .Ppredict = PREDICT(AVERAGE_2),     .Pencode = ENCODING(SIGNED_VB), CONDITION(DEBUG_LOG)},
-    {"debug",       5, SIGNED,   .Ipredict = PREDICT(0),       .Iencode = ENCODING(SIGNED_VB),   .Ppredict = PREDICT(AVERAGE_2),     .Pencode = ENCODING(SIGNED_VB), CONDITION(DEBUG_LOG)},
-    {"debug",       6, SIGNED,   .Ipredict = PREDICT(0),       .Iencode = ENCODING(SIGNED_VB),   .Ppredict = PREDICT(AVERAGE_2),     .Pencode = ENCODING(SIGNED_VB), CONDITION(DEBUG_LOG)},
-    {"debug",       7, SIGNED,   .Ipredict = PREDICT(0),       .Iencode = ENCODING(SIGNED_VB),   .Ppredict = PREDICT(AVERAGE_2),     .Pencode = ENCODING(SIGNED_VB), CONDITION(DEBUG_LOG)},
+#define BLACKBOX_DEFINE_DEBUG_FIELD(index) \
+    {"debug", index, SIGNED, .Ipredict = PREDICT(0), .Iencode = ENCODING(SIGNED_VB), .Ppredict = PREDICT(AVERAGE_2), .Pencode = ENCODING(SIGNED_VB), CONDITION(DEBUG_LOG)},
+    BLACKBOX_DEBUG_FIELD_LIST(BLACKBOX_DEFINE_DEBUG_FIELD)
+#undef BLACKBOX_DEFINE_DEBUG_FIELD
+#undef BLACKBOX_DEBUG_FIELD_LIST
     /* Motors only rarely drops under minthrottle (when stick falls below mincommand), so predict minthrottle for it and use *unsigned* encoding (which is large for negative numbers but more compact for positive ones): */
     {"motor",       0, UNSIGNED, .Ipredict = PREDICT(MINMOTOR), .Iencode = ENCODING(UNSIGNED_VB), .Ppredict = PREDICT(AVERAGE_2), .Pencode = ENCODING(SIGNED_VB), CONDITION(AT_LEAST_MOTORS_1)},
     /* Subsequent motors base their I-frame values on the first one, P-frame values on the average of last two frames: */

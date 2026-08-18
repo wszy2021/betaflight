@@ -20,6 +20,9 @@
 
 #pragma once
 
+#include <stdbool.h>
+#include <stdint.h>
+
 #include "common/axis.h"
 #include "common/filter.h"
 #include "common/time.h"
@@ -36,6 +39,8 @@
 #include "flight/pid.h"
 
 #include "pg/pg.h"
+
+#include "follow/follow_gyrocal.h"
 
 #define LPF_MAX_HZ 1000 // so little filtering above 1000hz that if the user wants less delay, they must disable the filter
 #define DYN_LPF_MAX_HZ 1000
@@ -198,6 +203,7 @@ typedef struct gyroConfig_s {
     uint8_t gyro_lpf1_dyn_expo; // set the curve for dynamic gyro lowpass filter
     uint8_t simplified_gyro_filter;
     uint8_t simplified_gyro_filter_multiplier;
+    gyroCalibrationConfig_t gyroCalibration[GYRO_CALIBRATION_CONFIG_COUNT];
 } gyroConfig_t;
 
 PG_DECLARE(gyroConfig_t, gyroConfig);
@@ -206,6 +212,9 @@ void gyroUpdate(void);
 void gyroFiltering(timeUs_t currentTimeUs);
 float gyroGetFilteredDownsampled(int axis);
 void gyroStartCalibration(bool isFirstArmingCalibration);
+bool gyroSaveCalibration(void);
+void gyroResetSavedCalibration(void);
+void gyroApplySavedCalibration(gyroSensor_t *gyroSensor, uint8_t gyroIndex);
 bool isFirstArmingGyroCalibrationRunning(void);
 bool gyroIsCalibrationComplete(void);
 void gyroReadTemperature(void);

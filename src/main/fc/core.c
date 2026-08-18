@@ -104,6 +104,7 @@
 #include "sensors/gyro.h"
 
 #include "telemetry/telemetry.h"
+#include "follow/follow_bundle.h"
 
 #include "core.h"
 
@@ -1000,9 +1001,12 @@ void processRxModes(timeUs_t currentTimeUs)
     }
 #endif
 
-    if (FLIGHT_MODE(ANGLE_MODE) || FLIGHT_MODE(HORIZON_MODE)) {
+    const bool levelModeActive = FLIGHT_MODE(ANGLE_MODE) || FLIGHT_MODE(HORIZON_MODE);
+    const bool highRateAttitudeTask = levelModeActive || followTrackingModeActive();
+
+    if (highRateAttitudeTask) {
         LED1_ON;
-        // increase frequency of attitude task to reduce drift when in angle or horizon mode
+        // increase frequency of attitude task to reduce drift when in angle, horizon, or follow tracking mode
         rescheduleTask(TASK_ATTITUDE, TASK_PERIOD_HZ(acc.sampleRateHz / (float)imuConfig()->imu_process_denom));
     } else {
         LED1_OFF;

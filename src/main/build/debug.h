@@ -22,7 +22,7 @@
 
 #include <stdint.h>
 
-#define DEBUG16_VALUE_COUNT 8
+#define DEBUG16_VALUE_COUNT 38
 extern int16_t debug[DEBUG16_VALUE_COUNT];
 extern uint8_t debugMode;
 
@@ -119,6 +119,7 @@ typedef enum {
     DEBUG_MAG_CALIB,
     DEBUG_MAG_TASK_RATE,
     DEBUG_EZLANDING,
+    DEBUG_Test,
     DEBUG_COUNT
 } debugType_e;
 

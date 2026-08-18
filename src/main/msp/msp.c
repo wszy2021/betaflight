@@ -202,6 +202,10 @@ typedef enum {
 
 #define RATEPROFILE_MASK (1 << 7)
 
+// Keep the legacy MSP_DEBUG payload stable while Blackbox records all debug channels.
+#define MSP_DEBUG_VALUE_COUNT 8
+STATIC_ASSERT(MSP_DEBUG_VALUE_COUNT <= DEBUG16_VALUE_COUNT, msp_debug_value_count_exceeds_debug_storage);
+
 #define RTC_NOT_SUPPORTED 0xff
 
 typedef enum {
@@ -746,13 +750,18 @@ static bool mspCommonProcessOutCommand(int16_t cmdMSP, sbuf_t *dst, mspPostProce
         break;
     }
 
-    case MSP_BUILD_INFO:
+    case MSP_BUILD_INFO: {
         sbufWriteData(dst, buildDate, BUILD_DATE_LENGTH);
         sbufWriteData(dst, buildTime, BUILD_TIME_LENGTH);
-        sbufWriteData(dst, shortGitRevision, GIT_SHORT_REVISION_LENGTH);
+        char shortGitRevisionOutput[GIT_SHORT_REVISION_LENGTH] = { 0 };
+        for (int i = 0; i < GIT_SHORT_REVISION_LENGTH && shortGitRevision[i]; i++) {
+            shortGitRevisionOutput[i] = shortGitRevision[i];
+        }
+        sbufWriteData(dst, shortGitRevisionOutput, sizeof(shortGitRevisionOutput));
         // Added in API version 1.46
         sbufWriteBuildInfoFlags(dst);
         break;
+    }
 
     case MSP_ANALOG:
         sbufWriteU8(dst, (uint8_t)constrain(getLegacyBatteryVoltage(), 0, 255));
@@ -763,8 +772,8 @@ static bool mspCommonProcessOutCommand(int16_t cmdMSP, sbuf_t *dst, mspPostProce
         break;
 
     case MSP_DEBUG:
-        for (int i = 0; i < DEBUG16_VALUE_COUNT; i++) {
-            sbufWriteU16(dst, debug[i]);      // 4 variables are here for general monitoring purpose
+        for (int i = 0; i < MSP_DEBUG_VALUE_COUNT; i++) {
+            sbufWriteU16(dst, debug[i]);
         }
         break;
 
