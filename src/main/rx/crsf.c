@@ -37,7 +37,10 @@
 
 #include "config/config.h"
 
+#include "fc/runtime_config.h"
+
 #include "pg/rx.h"
+#include "pg/rx_uid.h"
 
 #include "drivers/persistent.h"
 #include "drivers/serial.h"
@@ -74,6 +77,11 @@ static timeUs_t crsfFrameStartAtUs = 0;
 static uint8_t telemetryBuf[CRSF_FRAME_SIZE_MAX];
 static uint8_t telemetryBufLen = 0;
 static float channelScale = CRSF_RC_CHANNEL_SCALE_LEGACY;
+
+static uint8_t crsfRxUid[CRSF_RX_UID_LENGTH];
+static bool crsfRxUidReceived = false;
+static volatile bool crsfUidAckPending = false;
+static volatile bool crsfUidSavePending = false;
 
 #ifdef USE_RX_LINK_UPLINK_POWER
 #define CRSF_UPLINK_POWER_LEVEL_MW_ITEMS_COUNT 9
@@ -350,6 +358,92 @@ uint32_t *followGetCrsfChannelData(void)
     return crsfChannelData;
 }
 
+static void crsfHandleRxUidAnnounce(const uint8_t *uid)
+{
+    memcpy(crsfRxUid, uid, CRSF_RX_UID_LENGTH);
+    crsfRxUidReceived = true;
+    crsfUidAckPending = true;
+
+    if (!rxUidConfig()->valid || memcmp(rxUidConfig()->uid, uid, CRSF_RX_UID_LENGTH) != 0) {
+        memcpy(rxUidConfigMutable()->uid, uid, CRSF_RX_UID_LENGTH);
+        rxUidConfigMutable()->valid = 1;
+        crsfUidSavePending = true;
+    }
+}
+
+static bool crsfIsRxUidCommandFrame(void)
+{
+    return crsfFrame.frame.frameLength == CRSF_COMMAND_RX_UID_FRAME_LENGTH &&
+        crsfFrame.bytes[3] == CRSF_ADDRESS_FLIGHT_CONTROLLER &&
+        crsfFrame.bytes[4] == CRSF_ADDRESS_CRSF_RECEIVER &&
+        crsfFrame.bytes[5] == CRSF_COMMAND_SUBCMD_RX &&
+        crsfFrame.bytes[6] == CRSF_COMMAND_SUBCMD_RX_UID;
+}
+
+static void crsfSendRxUidAck(void)
+{
+    if (serialPort == NULL) {
+        return;
+    }
+
+    // FC → RX 停发：COMMAND 0x10 0x09（只回命令）
+    uint8_t ackFrame[] = {
+        CRSF_SYNC_BYTE,
+        0x07,
+        CRSF_FRAMETYPE_COMMAND,
+        CRSF_ADDRESS_CRSF_RECEIVER,
+        CRSF_ADDRESS_FLIGHT_CONTROLLER,
+        CRSF_COMMAND_SUBCMD_RX,
+        CRSF_COMMAND_SUBCMD_RX_UID,
+        0x00, // Command CRC8
+        0x00, // Packet CRC8
+    };
+
+    uint8_t cmdCrc = crc8_poly_0xba(0, ackFrame[2]);
+    for (int i = 3; i <= 6; i++) {
+        cmdCrc = crc8_poly_0xba(cmdCrc, ackFrame[i]);
+    }
+    ackFrame[7] = cmdCrc;
+
+    uint8_t pktCrc = crc8_dvb_s2(0, ackFrame[2]);
+    for (int i = 3; i <= 7; i++) {
+        pktCrc = crc8_dvb_s2(pktCrc, ackFrame[i]);
+    }
+    ackFrame[8] = pktCrc;
+
+    serialWriteBuf(serialPort, ackFrame, sizeof(ackFrame));
+}
+
+bool crsfRxGetUid(uint8_t *uid)
+{
+    if (uid == NULL) {
+        return false;
+    }
+
+    if (crsfRxUidReceived) {
+        memcpy(uid, crsfRxUid, CRSF_RX_UID_LENGTH);
+        return true;
+    }
+
+    if (rxUidConfig()->valid) {
+        memcpy(uid, rxUidConfig()->uid, CRSF_RX_UID_LENGTH);
+        return true;
+    }
+
+    memset(uid, 0, CRSF_RX_UID_LENGTH);
+    return false;
+}
+
+void crsfRxProcessUidSave(void)
+{
+    if (!crsfUidSavePending || ARMING_FLAG(ARMED) || isEepromWriteInProgress()) {
+        return;
+    }
+
+    crsfUidSavePending = false;
+    writeEEPROM();
+}
+
 // Receive ISR callback, called back from serial port
 STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
 {
@@ -455,14 +549,16 @@ STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
                 }
 #endif
 #endif
-#if defined(USE_CRSF_V3)
                 case CRSF_FRAMETYPE_COMMAND:
-                    if ((crsfFrame.bytes[fullFrameLength - 2] == crsfFrameCmdCRC()) &&
+                    if (crsfIsRxUidCommandFrame()) {
+                        crsfHandleRxUidAnnounce(&crsfFrame.bytes[7]);
+#if defined(USE_CRSF_V3)
+                    } else if ((crsfFrame.bytes[fullFrameLength - 2] == crsfFrameCmdCRC()) &&
                         (crsfFrame.bytes[3] == CRSF_ADDRESS_FLIGHT_CONTROLLER)) {
                         crsfProcessCommand(crsfFrame.frame.payload + CRSF_FRAME_ORIGIN_DEST_SIZE);
+#endif
                     }
                     break;
-#endif
                 default:
                     break;
                 }
@@ -489,6 +585,11 @@ STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
 STATIC_UNIT_TESTED uint8_t crsfFrameStatus(rxRuntimeState_t *rxRuntimeState)
 {
     UNUSED(rxRuntimeState);
+
+    if (crsfUidAckPending) {
+        crsfUidAckPending = false;
+        crsfSendRxUidAck();
+    }
 
 #if defined(USE_CRSF_LINK_STATISTICS)
     crsfCheckRssi(micros());
@@ -630,6 +731,11 @@ bool crsfRxIsTelemetryBufEmpty(void)
 
 bool crsfRxInit(const rxConfig_t *rxConfig, rxRuntimeState_t *rxRuntimeState)
 {
+    if (rxUidConfig()->valid) {
+        memcpy(crsfRxUid, rxUidConfig()->uid, CRSF_RX_UID_LENGTH);
+        crsfRxUidReceived = true;
+    }
+
     for (int ii = 0; ii < CRSF_MAX_CHANNEL; ++ii) {
         crsfChannelData[ii] = (16 * rxConfig->midrc) / 10 - 1408;
     }

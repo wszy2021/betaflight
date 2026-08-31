@@ -99,6 +99,7 @@
 #include "pg/rx_spi.h"
 #include "pg/rx_spi_cc2500.h"
 #include "pg/rx_spi_expresslrs.h"
+#include "pg/rx_uid.h"
 #include "pg/sdcard.h"
 #include "pg/vcd.h"
 #include "pg/vtx_io.h"
@@ -1721,6 +1722,9 @@ const clivalue_t valueTable[] = {
     { "expresslrs_rate_index",  VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, 3 }, PG_RX_EXPRESSLRS_SPI_CONFIG, offsetof(rxExpressLrsSpiConfig_t, rateIndex) },
     { "expresslrs_switch_mode", VAR_UINT8 | MASTER_VALUE | MODE_LOOKUP, .config.lookup = { TABLE_SWITCH_MODE }, PG_RX_EXPRESSLRS_SPI_CONFIG, offsetof(rxExpressLrsSpiConfig_t, switchMode) },
     { "expresslrs_model_id",    VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, UINT8_MAX }, PG_RX_EXPRESSLRS_SPI_CONFIG, offsetof(rxExpressLrsSpiConfig_t, modelId) },
+#endif
+#ifdef USE_SERIALRX_CRSF
+    { "rx_uid",                 VAR_UINT8 | MASTER_VALUE | MODE_ARRAY, .config.array.length = 6, PG_RX_UID_CONFIG, offsetof(rxUidConfig_t, uid) },
 #endif
 
     { "scheduler_relax_rx",  VAR_UINT16  | HARDWARE_VALUE, .config.minmaxUnsigned = { 0, 500 }, PG_SCHEDULER_CONFIG, PG_ARRAY_ELEMENT_OFFSET(schedulerConfig_t, 0, rxRelaxDeterminism) },

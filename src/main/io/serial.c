@@ -208,6 +208,16 @@ void pgResetFn_serialConfig(serialConfig_t *serialConfig)
     }
 #endif
 
+#ifndef RC_BOARD_UART
+#define RC_BOARD_UART SERIAL_PORT_USART2
+#endif
+#ifdef RC_BOARD_UART
+    serialPortConfig_t *rcBoardUartConfig = serialFindPortConfigurationMutable(RC_BOARD_UART);
+    if (rcBoardUartConfig && rcBoardUartConfig->functionMask == 0) {
+        rcBoardUartConfig->functionMask = FUNCTION_RC_BOARD;
+    }
+#endif
+
 #if defined(USE_MSP_UART)
     serialPortConfig_t * uart1Config = serialFindPortConfigurationMutable(USE_MSP_UART);
     if (uart1Config) {

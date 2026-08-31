@@ -99,3 +99,5 @@ void crsfRxUpdateBaudrate(uint32_t baudrate);
 bool crsfRxUseNegotiatedBaud(void);
 bool crsfRxIsActive(void);
 void crsfRxBind(void);
+bool crsfRxGetUid(uint8_t *uid);
+void crsfRxProcessUidSave(void);

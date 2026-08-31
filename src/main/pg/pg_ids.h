@@ -158,6 +158,8 @@
 #define PG_SOFTSERIAL_PIN_CONFIG    558
 #define PG_BETAFLIGHT_END           558
 
+#define PG_RX_UID_CONFIG            1508
+
 
 // OSD configuration (subject to change)
 #define PG_OSD_FONT_CONFIG 2047

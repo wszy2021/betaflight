@@ -1,0 +1,605 @@
+diff --git a/mk/source.mk b/mk/source.mk
+index 7422f0fe0..3a950805e 100644
+--- a/mk/source.mk
++++ b/mk/source.mk
+@@ -57,6 +57,7 @@ COMMON_SRC = \
+             io/beeper.c \
+             io/piniobox.c \
+             io/serial.c \
++            io/rc_board.c \
+             io/smartaudio_protocol.c \
+             io/statusindicator.c \
+             io/tramp_protocol.c \
+diff --git a/src/main/cli/settings.c b/src/main/cli/settings.c
+index 829abb5f8..e30d9706c 100644
+--- a/src/main/cli/settings.c
++++ b/src/main/cli/settings.c
+@@ -99,6 +99,7 @@
+ #include "pg/rx_spi.h"
+ #include "pg/rx_spi_cc2500.h"
+ #include "pg/rx_spi_expresslrs.h"
++#include "pg/rx_uid.h"
+ #include "pg/sdcard.h"
+ #include "pg/vcd.h"
+ #include "pg/vtx_io.h"
+@@ -1722,6 +1723,9 @@ const clivalue_t valueTable[] = {
+     { "expresslrs_switch_mode", VAR_UINT8 | MASTER_VALUE | MODE_LOOKUP, .config.lookup = { TABLE_SWITCH_MODE }, PG_RX_EXPRESSLRS_SPI_CONFIG, offsetof(rxExpressLrsSpiConfig_t, switchMode) },
+     { "expresslrs_model_id",    VAR_UINT8 | MASTER_VALUE, .config.minmaxUnsigned = { 0, UINT8_MAX }, PG_RX_EXPRESSLRS_SPI_CONFIG, offsetof(rxExpressLrsSpiConfig_t, modelId) },
+ #endif
++#ifdef USE_SERIALRX_CRSF
++    { "rx_uid",                 VAR_UINT8 | MASTER_VALUE | MODE_ARRAY, .config.array.length = 6, PG_RX_UID_CONFIG, offsetof(rxUidConfig_t, uid) },
++#endif
+ 
+     { "scheduler_relax_rx",  VAR_UINT16  | HARDWARE_VALUE, .config.minmaxUnsigned = { 0, 500 }, PG_SCHEDULER_CONFIG, PG_ARRAY_ELEMENT_OFFSET(schedulerConfig_t, 0, rxRelaxDeterminism) },
+     { "scheduler_relax_osd", VAR_UINT16  | HARDWARE_VALUE, .config.minmaxUnsigned = { 0, 500 }, PG_SCHEDULER_CONFIG, PG_ARRAY_ELEMENT_OFFSET(schedulerConfig_t, 0, osdRelaxDeterminism) },
+diff --git a/src/main/fc/init.c b/src/main/fc/init.c
+index 735e7bd2b..0b3595bd1 100644
+--- a/src/main/fc/init.c
++++ b/src/main/fc/init.c
+@@ -172,6 +172,7 @@
+ 
+ #include "telemetry/telemetry.h"
+ #include "follow/follow_bundle.h"
++#include "io/rc_board.h"
+ 
+ #ifdef USE_HARDWARE_REVISION_DETECTION
+ #include "hardware_revision.h"
+@@ -771,6 +772,7 @@ void init(void)
+     failsafeInit();
+ 
+     rxInit();
++    rcBoardInit();
+ 
+ #ifdef USE_GPS
+     if (featureIsEnabled(FEATURE_GPS)) {
+diff --git a/src/main/fc/tasks.c b/src/main/fc/tasks.c
+index 38cb2e66a..1698680b3 100644
+--- a/src/main/fc/tasks.c
++++ b/src/main/fc/tasks.c
+@@ -67,6 +67,7 @@
+ #include "io/ledstrip.h"
+ #include "io/piniobox.h"
+ #include "io/serial.h"
++#include "io/rc_board.h"
+ #include "io/transponder_ir.h"
+ #include "io/vtx_tramp.h" // Will be gone
+ #include "io/rcdevice_cam.h"
+@@ -147,6 +148,7 @@ static void taskHandleSerial(timeUs_t currentTimeUs)
+ #endif
+     bool evaluateMspData = ARMING_FLAG(ARMED) ? MSP_SKIP_NON_MSP_DATA : MSP_EVALUATE_NON_MSP_DATA;
+     mspSerialProcess(evaluateMspData, mspFcProcessCommand, mspFcProcessReply);
++    rcBoardProcess();
+ }
+ 
+ static void taskBatteryAlerts(timeUs_t currentTimeUs)
+diff --git a/src/main/io/rc_board.c b/src/main/io/rc_board.c
+new file mode 100644
+index 000000000..90ebf1d59
+--- /dev/null
++++ b/src/main/io/rc_board.c
+@@ -0,0 +1,222 @@
++#include <stdbool.h>
++#include <stdint.h>
++#include <string.h>
++
++#include "platform.h"
++
++#ifdef USE_SERIALRX_CRSF
++
++#include "drivers/serial.h"
++#include "drivers/time.h"
++#include "io/rc_board.h"
++#include "io/serial.h"
++#include "rx/crsf.h"
++#include "rx/crsf_protocol.h"
++#include "rx/rx_bind.h"
++
++#define RC_BOARD_BAUDRATE           115200
++#define RC_BOARD_FRAME_HEADER0      0xAA
++#define RC_BOARD_FRAME_HEADER1      0x55
++#define RC_BOARD_FRAME_TAIL         0x5A
++#define RC_BOARD_PAYLOAD_MAX        8
++#define RC_BOARD_FRAME_TIMEOUT_US   50000
++
++#define RC_BOARD_CMD_GET_UID        0x01
++#define RC_BOARD_CMD_BIND           0x02
++#define RC_BOARD_CMD_UID_REPLY      0x81
++#define RC_BOARD_CMD_BIND_REPLY     0x82
++
++#define RC_BOARD_STATUS_OK          0
++#define RC_BOARD_STATUS_FAIL        1
++
++typedef enum {
++    RC_BOARD_WAIT_HEADER0 = 0,
++    RC_BOARD_WAIT_HEADER1,
++    RC_BOARD_WAIT_CMD,
++    RC_BOARD_WAIT_LEN,
++    RC_BOARD_WAIT_PAYLOAD,
++    RC_BOARD_WAIT_XOR,
++    RC_BOARD_WAIT_TAIL,
++} rcBoardParseState_e;
++
++static serialPort_t *rcBoardPort;
++
++static rcBoardParseState_e parseState = RC_BOARD_WAIT_HEADER0;
++static uint8_t parseCmd;
++static uint8_t parseLen;
++static uint8_t parseIndex;
++static uint8_t parsePayload[RC_BOARD_PAYLOAD_MAX];
++static uint8_t parseXor;
++static timeUs_t parseLastByteUs;
++
++static volatile uint8_t pendingCmd;
++static volatile bool cmdPending;
++
++static uint8_t rcBoardChecksum(uint8_t cmd, uint8_t len, const uint8_t *payload)
++{
++    uint8_t checksum = cmd ^ len;
++    for (uint8_t i = 0; i < len; i++) {
++        checksum ^= payload[i];
++    }
++    return checksum;
++}
++
++static void rcBoardSendFrame(uint8_t cmd, const uint8_t *payload, uint8_t len)
++{
++    if (!rcBoardPort || len > RC_BOARD_PAYLOAD_MAX) {
++        return;
++    }
++
++    uint8_t frame[6 + RC_BOARD_PAYLOAD_MAX];
++    uint8_t index = 0;
++
++    frame[index++] = RC_BOARD_FRAME_HEADER0;
++    frame[index++] = RC_BOARD_FRAME_HEADER1;
++    frame[index++] = cmd;
++    frame[index++] = len;
++    for (uint8_t i = 0; i < len; i++) {
++        frame[index++] = payload[i];
++    }
++    frame[index++] = rcBoardChecksum(cmd, len, payload);
++    frame[index++] = RC_BOARD_FRAME_TAIL;
++
++    serialWriteBuf(rcBoardPort, frame, index);
++}
++
++static void rcBoardResetParser(void)
++{
++    parseState = RC_BOARD_WAIT_HEADER0;
++    parseIndex = 0;
++    parseLen = 0;
++}
++
++static void rcBoardDataReceive(uint16_t c, void *data)
++{
++    UNUSED(data);
++
++    const timeUs_t nowUs = microsISR();
++    if (parseState != RC_BOARD_WAIT_HEADER0 &&
++        cmpTimeUs(nowUs, parseLastByteUs) > RC_BOARD_FRAME_TIMEOUT_US) {
++        rcBoardResetParser();
++    }
++    parseLastByteUs = nowUs;
++
++    const uint8_t byte = (uint8_t)c;
++
++    switch (parseState) {
++    case RC_BOARD_WAIT_HEADER0:
++        if (byte == RC_BOARD_FRAME_HEADER0) {
++            parseState = RC_BOARD_WAIT_HEADER1;
++        }
++        break;
++    case RC_BOARD_WAIT_HEADER1:
++        parseState = (byte == RC_BOARD_FRAME_HEADER1) ? RC_BOARD_WAIT_CMD : RC_BOARD_WAIT_HEADER0;
++        break;
++    case RC_BOARD_WAIT_CMD:
++        parseCmd = byte;
++        parseState = RC_BOARD_WAIT_LEN;
++        break;
++    case RC_BOARD_WAIT_LEN:
++        parseLen = byte;
++        parseIndex = 0;
++        parseXor = parseCmd ^ parseLen;
++        if (parseLen > RC_BOARD_PAYLOAD_MAX) {
++            rcBoardResetParser();
++        } else if (parseLen == 0) {
++            parseState = RC_BOARD_WAIT_XOR;
++        } else {
++            parseState = RC_BOARD_WAIT_PAYLOAD;
++        }
++        break;
++    case RC_BOARD_WAIT_PAYLOAD:
++        parsePayload[parseIndex++] = byte;
++        parseXor ^= byte;
++        if (parseIndex >= parseLen) {
++            parseState = RC_BOARD_WAIT_XOR;
++        }
++        break;
++    case RC_BOARD_WAIT_XOR:
++        if (byte == parseXor) {
++            parseState = RC_BOARD_WAIT_TAIL;
++        } else {
++            rcBoardResetParser();
++        }
++        break;
++    case RC_BOARD_WAIT_TAIL:
++        if (byte == RC_BOARD_FRAME_TAIL) {
++            pendingCmd = parseCmd;
++            cmdPending = true;
++        }
++        rcBoardResetParser();
++        break;
++    default:
++        rcBoardResetParser();
++        break;
++    }
++}
++
++static void rcBoardHandleGetUid(void)
++{
++    uint8_t uid[CRSF_RX_UID_LENGTH] = { 0 };
++    crsfRxGetUid(uid);
++    rcBoardSendFrame(RC_BOARD_CMD_UID_REPLY, uid, CRSF_RX_UID_LENGTH);
++}
++
++static void rcBoardHandleBind(void)
++{
++    uint8_t status = RC_BOARD_STATUS_FAIL;
++
++#if defined(USE_RX_BIND)
++    if (startRxBind()) {
++        status = RC_BOARD_STATUS_OK;
++    }
++#else
++    if (crsfRxIsActive()) {
++        crsfRxBind();
++        status = RC_BOARD_STATUS_OK;
++    }
++#endif
++
++    rcBoardSendFrame(RC_BOARD_CMD_BIND_REPLY, &status, 1);
++}
++
++void rcBoardInit(void)
++{
++    const serialPortConfig_t *portConfig = findSerialPortConfig(FUNCTION_RC_BOARD);
++    if (!portConfig) {
++        return;
++    }
++
++    rcBoardPort = openSerialPort(portConfig->identifier,
++        FUNCTION_RC_BOARD,
++        rcBoardDataReceive,
++        NULL,
++        RC_BOARD_BAUDRATE,
++        MODE_RXTX,
++        SERIAL_NOT_INVERTED);
++}
++
++void rcBoardProcess(void)
++{
++    crsfRxProcessUidSave();
++
++    if (!cmdPending) {
++        return;
++    }
++
++    const uint8_t cmd = pendingCmd;
++    cmdPending = false;
++
++    switch (cmd) {
++    case RC_BOARD_CMD_GET_UID:
++        rcBoardHandleGetUid();
++        break;
++    case RC_BOARD_CMD_BIND:
++        rcBoardHandleBind();
++        break;
++    default:
++        break;
++    }
++}
++
++#endif
+diff --git a/src/main/io/rc_board.h b/src/main/io/rc_board.h
+new file mode 100644
+index 000000000..a5b8c89a7
+--- /dev/null
++++ b/src/main/io/rc_board.h
+@@ -0,0 +1,24 @@
++#pragma once
++
++/*
++ * 遥控板串口协议（115200 8N1）
++ *
++ * 帧格式：AA 55 [CMD] [LEN] [PAYLOAD...] [XOR] 5A
++ * XOR = CMD ^ LEN ^ PAYLOAD[0] ^ ... ^ PAYLOAD[LEN-1]
++ *
++ * 遥控板 → FC
++ *   读 UID     AA 55 01 00 01 5A
++ *   接收机配对 AA 55 02 00 02 5A
++ *
++ * FC → 遥控板
++ *   UID 回复   AA 55 81 06 [UID0..5] [XOR] 5A
++ *   配对应答   AA 55 82 01 [STATUS] [XOR] 5A   STATUS: 0=OK, 1=失败
++ */
++
++#ifdef USE_SERIALRX_CRSF
++void rcBoardInit(void);
++void rcBoardProcess(void);
++#else
++static inline void rcBoardInit(void) {}
++static inline void rcBoardProcess(void) {}
++#endif
+diff --git a/src/main/io/serial.c b/src/main/io/serial.c
+index ddfbd8741..b0011bf5d 100644
+--- a/src/main/io/serial.c
++++ b/src/main/io/serial.c
+@@ -208,6 +208,16 @@ void pgResetFn_serialConfig(serialConfig_t *serialConfig)
+     }
+ #endif
+ 
++#ifndef RC_BOARD_UART
++#define RC_BOARD_UART SERIAL_PORT_USART2
++#endif
++#ifdef RC_BOARD_UART
++    serialPortConfig_t *rcBoardUartConfig = serialFindPortConfigurationMutable(RC_BOARD_UART);
++    if (rcBoardUartConfig && rcBoardUartConfig->functionMask == 0) {
++        rcBoardUartConfig->functionMask = FUNCTION_RC_BOARD;
++    }
++#endif
++
+ #if defined(USE_MSP_UART)
+     serialPortConfig_t * uart1Config = serialFindPortConfigurationMutable(USE_MSP_UART);
+     if (uart1Config) {
+diff --git a/src/main/io/serial.h b/src/main/io/serial.h
+index 9db0c91ee..a7b608cea 100644
+--- a/src/main/io/serial.h
++++ b/src/main/io/serial.h
+@@ -51,6 +51,7 @@ typedef enum {
+     FUNCTION_LIDAR_TF            = (1 << 15), // 32768
+     FUNCTION_FRSKY_OSD           = (1 << 16), // 65536
+     FUNCTION_VTX_MSP             = (1 << 17), // 131072
++    FUNCTION_RC_BOARD            = (1 << 18), // 262144  遥控板：读UID / 接收机配对
+ } serialPortFunction_e;
+ 
+ #define TELEMETRY_SHAREABLE_PORT_FUNCTIONS_MASK (FUNCTION_TELEMETRY_FRSKY_HUB | FUNCTION_TELEMETRY_LTM | FUNCTION_TELEMETRY_MAVLINK)
+diff --git a/src/main/pg/pg_ids.h b/src/main/pg/pg_ids.h
+index 7a97873c5..48b075298 100644
+--- a/src/main/pg/pg_ids.h
++++ b/src/main/pg/pg_ids.h
+@@ -158,6 +158,8 @@
+ #define PG_SOFTSERIAL_PIN_CONFIG    558
+ #define PG_BETAFLIGHT_END           558
+ 
++#define PG_RX_UID_CONFIG            1508
++
+ 
+ // OSD configuration (subject to change)
+ #define PG_OSD_FONT_CONFIG 2047
+diff --git a/src/main/pg/rx_uid.c b/src/main/pg/rx_uid.c
+new file mode 100644
+index 000000000..8e963ca27
+--- /dev/null
++++ b/src/main/pg/rx_uid.c
+@@ -0,0 +1,12 @@
++#include "platform.h"
++
++#include "pg/pg.h"
++#include "pg/pg_ids.h"
++#include "pg/rx_uid.h"
++
++PG_REGISTER_WITH_RESET_TEMPLATE(rxUidConfig_t, rxUidConfig, PG_RX_UID_CONFIG, 0);
++
++PG_RESET_TEMPLATE(rxUidConfig_t, rxUidConfig,
++    .uid = { 0 },
++    .valid = 0,
++);
+diff --git a/src/main/pg/rx_uid.h b/src/main/pg/rx_uid.h
+new file mode 100644
+index 000000000..bcc984046
+--- /dev/null
++++ b/src/main/pg/rx_uid.h
+@@ -0,0 +1,11 @@
++#pragma once
++
++#include "pg/pg.h"
++#include "rx/crsf_protocol.h"
++
++typedef struct rxUidConfig_s {
++    uint8_t uid[CRSF_RX_UID_LENGTH];
++    uint8_t valid;
++} rxUidConfig_t;
++
++PG_DECLARE(rxUidConfig_t, rxUidConfig);
+diff --git a/src/main/rx/crsf.c b/src/main/rx/crsf.c
+index db5bfe669..ee3796755 100644
+--- a/src/main/rx/crsf.c
++++ b/src/main/rx/crsf.c
+@@ -37,7 +37,10 @@
+ 
+ #include "config/config.h"
+ 
++#include "fc/runtime_config.h"
++
+ #include "pg/rx.h"
++#include "pg/rx_uid.h"
+ 
+ #include "drivers/persistent.h"
+ #include "drivers/serial.h"
+@@ -75,6 +78,11 @@ static uint8_t telemetryBuf[CRSF_FRAME_SIZE_MAX];
+ static uint8_t telemetryBufLen = 0;
+ static float channelScale = CRSF_RC_CHANNEL_SCALE_LEGACY;
+ 
++static uint8_t crsfRxUid[CRSF_RX_UID_LENGTH];
++static bool crsfRxUidReceived = false;
++static volatile bool crsfUidAckPending = false;
++static volatile bool crsfUidSavePending = false;
++
+ #ifdef USE_RX_LINK_UPLINK_POWER
+ #define CRSF_UPLINK_POWER_LEVEL_MW_ITEMS_COUNT 9
+ // Uplink power levels by uplinkTXPower expressed in mW (250 mW is from ver >=4.00, 50 mW in a future version and for ExpressLRS)
+@@ -350,6 +358,92 @@ uint32_t *followGetCrsfChannelData(void)
+     return crsfChannelData;
+ }
+ 
++static void crsfHandleRxUidAnnounce(const uint8_t *uid)
++{
++    memcpy(crsfRxUid, uid, CRSF_RX_UID_LENGTH);
++    crsfRxUidReceived = true;
++    crsfUidAckPending = true;
++
++    if (!rxUidConfig()->valid || memcmp(rxUidConfig()->uid, uid, CRSF_RX_UID_LENGTH) != 0) {
++        memcpy(rxUidConfigMutable()->uid, uid, CRSF_RX_UID_LENGTH);
++        rxUidConfigMutable()->valid = 1;
++        crsfUidSavePending = true;
++    }
++}
++
++static bool crsfIsRxUidCommandFrame(void)
++{
++    return crsfFrame.frame.frameLength == CRSF_COMMAND_RX_UID_FRAME_LENGTH &&
++        crsfFrame.bytes[3] == CRSF_ADDRESS_FLIGHT_CONTROLLER &&
++        crsfFrame.bytes[4] == CRSF_ADDRESS_CRSF_RECEIVER &&
++        crsfFrame.bytes[5] == CRSF_COMMAND_SUBCMD_RX &&
++        crsfFrame.bytes[6] == CRSF_COMMAND_SUBCMD_RX_UID;
++}
++
++static void crsfSendRxUidAck(void)
++{
++    if (serialPort == NULL) {
++        return;
++    }
++
++    // FC → RX 停发：COMMAND 0x10 0x09（只回命令）
++    uint8_t ackFrame[] = {
++        CRSF_SYNC_BYTE,
++        0x07,
++        CRSF_FRAMETYPE_COMMAND,
++        CRSF_ADDRESS_CRSF_RECEIVER,
++        CRSF_ADDRESS_FLIGHT_CONTROLLER,
++        CRSF_COMMAND_SUBCMD_RX,
++        CRSF_COMMAND_SUBCMD_RX_UID,
++        0x00, // Command CRC8
++        0x00, // Packet CRC8
++    };
++
++    uint8_t cmdCrc = crc8_poly_0xba(0, ackFrame[2]);
++    for (int i = 3; i <= 6; i++) {
++        cmdCrc = crc8_poly_0xba(cmdCrc, ackFrame[i]);
++    }
++    ackFrame[7] = cmdCrc;
++
++    uint8_t pktCrc = crc8_dvb_s2(0, ackFrame[2]);
++    for (int i = 3; i <= 7; i++) {
++        pktCrc = crc8_dvb_s2(pktCrc, ackFrame[i]);
++    }
++    ackFrame[8] = pktCrc;
++
++    serialWriteBuf(serialPort, ackFrame, sizeof(ackFrame));
++}
++
++bool crsfRxGetUid(uint8_t *uid)
++{
++    if (uid == NULL) {
++        return false;
++    }
++
++    if (crsfRxUidReceived) {
++        memcpy(uid, crsfRxUid, CRSF_RX_UID_LENGTH);
++        return true;
++    }
++
++    if (rxUidConfig()->valid) {
++        memcpy(uid, rxUidConfig()->uid, CRSF_RX_UID_LENGTH);
++        return true;
++    }
++
++    memset(uid, 0, CRSF_RX_UID_LENGTH);
++    return false;
++}
++
++void crsfRxProcessUidSave(void)
++{
++    if (!crsfUidSavePending || ARMING_FLAG(ARMED) || isEepromWriteInProgress()) {
++        return;
++    }
++
++    crsfUidSavePending = false;
++    writeEEPROM();
++}
++
+ // Receive ISR callback, called back from serial port
+ STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
+ {
+@@ -455,14 +549,16 @@ STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
+                 }
+ #endif
+ #endif
+-#if defined(USE_CRSF_V3)
+                 case CRSF_FRAMETYPE_COMMAND:
+-                    if ((crsfFrame.bytes[fullFrameLength - 2] == crsfFrameCmdCRC()) &&
++                    if (crsfIsRxUidCommandFrame()) {
++                        crsfHandleRxUidAnnounce(&crsfFrame.bytes[7]);
++#if defined(USE_CRSF_V3)
++                    } else if ((crsfFrame.bytes[fullFrameLength - 2] == crsfFrameCmdCRC()) &&
+                         (crsfFrame.bytes[3] == CRSF_ADDRESS_FLIGHT_CONTROLLER)) {
+                         crsfProcessCommand(crsfFrame.frame.payload + CRSF_FRAME_ORIGIN_DEST_SIZE);
++#endif
+                     }
+                     break;
+-#endif
+                 default:
+                     break;
+                 }
+@@ -490,6 +586,11 @@ STATIC_UNIT_TESTED uint8_t crsfFrameStatus(rxRuntimeState_t *rxRuntimeState)
+ {
+     UNUSED(rxRuntimeState);
+ 
++    if (crsfUidAckPending) {
++        crsfUidAckPending = false;
++        crsfSendRxUidAck();
++    }
++
+ #if defined(USE_CRSF_LINK_STATISTICS)
+     crsfCheckRssi(micros());
+ #endif
+@@ -630,6 +731,11 @@ bool crsfRxIsTelemetryBufEmpty(void)
+ 
+ bool crsfRxInit(const rxConfig_t *rxConfig, rxRuntimeState_t *rxRuntimeState)
+ {
++    if (rxUidConfig()->valid) {
++        memcpy(crsfRxUid, rxUidConfig()->uid, CRSF_RX_UID_LENGTH);
++        crsfRxUidReceived = true;
++    }
++
+     for (int ii = 0; ii < CRSF_MAX_CHANNEL; ++ii) {
+         crsfChannelData[ii] = (16 * rxConfig->midrc) / 10 - 1408;
+     }
+diff --git a/src/main/rx/crsf.h b/src/main/rx/crsf.h
+index c7323ffd1..50e379bdf 100644
+--- a/src/main/rx/crsf.h
++++ b/src/main/rx/crsf.h
+@@ -99,3 +99,5 @@ void crsfRxUpdateBaudrate(uint32_t baudrate);
+ bool crsfRxUseNegotiatedBaud(void);
+ bool crsfRxIsActive(void);
+ void crsfRxBind(void);
++bool crsfRxGetUid(uint8_t *uid);
++void crsfRxProcessUidSave(void);
+diff --git a/src/main/rx/crsf_protocol.h b/src/main/rx/crsf_protocol.h
+index 0b56233f5..1ef1264ab 100644
+--- a/src/main/rx/crsf_protocol.h
++++ b/src/main/rx/crsf_protocol.h
+@@ -66,6 +66,13 @@ enum {
+ 
+ enum {
+     CRSF_COMMAND_SUBCMD_RX_BIND = 0x01,    // bind command
++    CRSF_COMMAND_SUBCMD_RX_UID = 0x09,     // RX UID announce / stop-send ack
++};
++
++enum {
++    CRSF_RX_UID_LENGTH = 6,
++    // type + dest + origin + cmd + subcmd + UID[6] + CRC = 12
++    CRSF_COMMAND_RX_UID_FRAME_LENGTH = 12,
+ };
+ 
+ enum {

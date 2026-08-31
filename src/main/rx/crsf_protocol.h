@@ -66,6 +66,13 @@ enum {
 
 enum {
     CRSF_COMMAND_SUBCMD_RX_BIND = 0x01,    // bind command
+    CRSF_COMMAND_SUBCMD_RX_UID = 0x09,     // RX UID announce / stop-send ack
+};
+
+enum {
+    CRSF_RX_UID_LENGTH = 6,
+    // type + dest + origin + cmd + subcmd + UID[6] + CRC = 12
+    CRSF_COMMAND_RX_UID_FRAME_LENGTH = 12,
 };
 
 enum {
