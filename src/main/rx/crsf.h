@@ -20,6 +20,7 @@
 
 #pragma once
 
+#include "drivers/serial.h"
 #include "rx/crsf_protocol.h"
 
 #ifndef RC_RANGE_MIN
@@ -101,3 +102,6 @@ bool crsfRxIsActive(void);
 void crsfRxBind(void);
 bool crsfRxGetUid(uint8_t *uid);
 void crsfRxProcessUidSave(void);
+void crsfRxSetRcBoardPort(serialPort_t *port);
+void crsfRxMarkRcBoardConnected(void);
+void crsfRxReceiveFromRcBoard(uint16_t c);

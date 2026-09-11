@@ -1,3 +1,6 @@
+warning: in the working copy of 'src/main/rx/crsf.c', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'src/main/rx/crsf.h', CRLF will be replaced by LF the next time Git touches it
+warning: in the working copy of 'src/main/io/rc_board.c', CRLF will be replaced by LF the next time Git touches it
 diff --git a/mk/source.mk b/mk/source.mk
 index 7422f0fe0..3a950805e 100644
 --- a/mk/source.mk
@@ -74,10 +77,10 @@ index 38cb2e66a..1698680b3 100644
  static void taskBatteryAlerts(timeUs_t currentTimeUs)
 diff --git a/src/main/io/rc_board.c b/src/main/io/rc_board.c
 new file mode 100644
-index 000000000..90ebf1d59
+index 000000000..dec1a9b14
 --- /dev/null
 +++ b/src/main/io/rc_board.c
-@@ -0,0 +1,222 @@
+@@ -0,0 +1,230 @@
 +#include <stdbool.h>
 +#include <stdint.h>
 +#include <string.h>
@@ -174,6 +177,11 @@ index 000000000..90ebf1d59
 +{
 +    UNUSED(data);
 +
++    // The RC-board UART carries both the board control protocol and CRSF data.
++    // Both parsers validate complete frames, so it is safe to feed each byte to
++    // both of them.
++    crsfRxReceiveFromRcBoard(c);
++
 +    const timeUs_t nowUs = microsISR();
 +    if (parseState != RC_BOARD_WAIT_HEADER0 &&
 +        cmpTimeUs(nowUs, parseLastByteUs) > RC_BOARD_FRAME_TIMEOUT_US) {
@@ -224,6 +232,7 @@ index 000000000..90ebf1d59
 +        break;
 +    case RC_BOARD_WAIT_TAIL:
 +        if (byte == RC_BOARD_FRAME_TAIL) {
++            crsfRxMarkRcBoardConnected();
 +            pendingCmd = parseCmd;
 +            cmdPending = true;
 +        }
@@ -274,6 +283,8 @@ index 000000000..90ebf1d59
 +        RC_BOARD_BAUDRATE,
 +        MODE_RXTX,
 +        SERIAL_NOT_INVERTED);
++
++    crsfRxSetRcBoardPort(rcBoardPort);
 +}
 +
 +void rcBoardProcess(void)
@@ -412,7 +423,7 @@ index 000000000..bcc984046
 +
 +PG_DECLARE(rxUidConfig_t, rxUidConfig);
 diff --git a/src/main/rx/crsf.c b/src/main/rx/crsf.c
-index db5bfe669..ee3796755 100644
+index db5bfe669..6c4ffe9ef 100644
 --- a/src/main/rx/crsf.c
 +++ b/src/main/rx/crsf.c
 @@ -37,7 +37,10 @@
@@ -426,7 +437,31 @@ index db5bfe669..ee3796755 100644
  
  #include "drivers/persistent.h"
  #include "drivers/serial.h"
-@@ -75,6 +78,11 @@ static uint8_t telemetryBuf[CRSF_FRAME_SIZE_MAX];
+@@ -64,17 +67,37 @@
+ 
+ #define CRSF_FRAME_ERROR_COUNT_THRESHOLD    3
+ 
++// The RC-board link runs at 115200 baud, so a maximum-sized CRSF frame takes
++// longer than it does on the normal 420000-baud receiver port.
++#define CRSF_RC_BOARD_FRAME_TIMEOUT_US       6000
++#define CRSF_RC_BOARD_ACTIVE_TIMEOUT_US      250000
++
+ STATIC_UNIT_TESTED bool crsfFrameDone = false;
+ STATIC_UNIT_TESTED crsfFrame_t crsfFrame;
+ STATIC_UNIT_TESTED crsfFrame_t crsfChannelDataFrame;
+ STATIC_UNIT_TESTED uint32_t crsfChannelData[CRSF_MAX_CHANNEL];
+ 
+ static serialPort_t *serialPort;
++static serialPort_t *rcBoardSerialPort;
++static rxRuntimeState_t *crsfRxRuntimeState;
+ static timeUs_t crsfFrameStartAtUs = 0;
++static uint8_t crsfFramePosition;
++static crsfFrame_t rcBoardCrsfFrame;
++static timeUs_t rcBoardCrsfFrameStartAtUs;
++static uint8_t rcBoardCrsfFramePosition;
++static volatile timeUs_t rcBoardLastValidFrameAtUs;
++static volatile bool rcBoardCrsfSeen;
+ static uint8_t telemetryBuf[CRSF_FRAME_SIZE_MAX];
  static uint8_t telemetryBufLen = 0;
  static float channelScale = CRSF_RC_CHANNEL_SCALE_LEGACY;
  
@@ -435,10 +470,28 @@ index db5bfe669..ee3796755 100644
 +static volatile bool crsfUidAckPending = false;
 +static volatile bool crsfUidSavePending = false;
 +
++static serialPort_t *crsfActiveSerialPort(void);
++
  #ifdef USE_RX_LINK_UPLINK_POWER
  #define CRSF_UPLINK_POWER_LEVEL_MW_ITEMS_COUNT 9
  // Uplink power levels by uplinkTXPower expressed in mW (250 mW is from ver >=4.00, 50 mW in a future version and for ExpressLRS)
-@@ -350,6 +358,92 @@ uint32_t *followGetCrsfChannelData(void)
+@@ -333,6 +356,15 @@ STATIC_UNIT_TESTED uint8_t crsfFrameCRC(void)
+     return crc;
+ }
+ 
++static uint8_t crsfFrameBufferCRC(const crsfFrame_t *frame)
++{
++    uint8_t crc = crc8_dvb_s2(0, frame->frame.type);
++    for (int ii = 0; ii < frame->frame.frameLength - CRSF_FRAME_LENGTH_TYPE_CRC; ++ii) {
++        crc = crc8_dvb_s2(crc, frame->frame.payload[ii]);
++    }
++    return crc;
++}
++
+ #if defined(USE_CRSF_V3) || defined(UNIT_TEST)
+ STATIC_UNIT_TESTED uint8_t crsfFrameCmdCRC(void)
+ {
+@@ -350,17 +382,207 @@ uint32_t *followGetCrsfChannelData(void)
      return crsfChannelData;
  }
  
@@ -466,7 +519,8 @@ index db5bfe669..ee3796755 100644
 +
 +static void crsfSendRxUidAck(void)
 +{
-+    if (serialPort == NULL) {
++    serialPort_t *const activePort = crsfActiveSerialPort();
++    if (activePort == NULL) {
 +        return;
 +    }
 +
@@ -495,7 +549,7 @@ index db5bfe669..ee3796755 100644
 +    }
 +    ackFrame[8] = pktCrc;
 +
-+    serialWriteBuf(serialPort, ackFrame, sizeof(ackFrame));
++    serialWriteBuf(activePort, ackFrame, sizeof(ackFrame));
 +}
 +
 +bool crsfRxGetUid(uint8_t *uid)
@@ -528,30 +582,255 @@ index db5bfe669..ee3796755 100644
 +    writeEEPROM();
 +}
 +
++static bool crsfRcBoardIsActiveAt(timeUs_t currentTimeUs)
++{
++    return rcBoardCrsfSeen &&
++        cmpTimeUs(currentTimeUs, rcBoardLastValidFrameAtUs) <= CRSF_RC_BOARD_ACTIVE_TIMEOUT_US;
++}
++
++static serialPort_t *crsfActiveSerialPort(void)
++{
++    return crsfRcBoardIsActiveAt(micros()) ? rcBoardSerialPort : serialPort;
++}
++
++static void crsfProcessValidatedFrame(rxRuntimeState_t *rxRuntimeState, timeUs_t currentTimeUs, int fullFrameLength, bool fromRcBoard)
++{
++    UNUSED(fullFrameLength);
++
++    if (fromRcBoard) {
++        rcBoardLastValidFrameAtUs = currentTimeUs;
++        rcBoardCrsfSeen = true;
++        crsfFramePosition = 0;
++    } else if (crsfRcBoardIsActiveAt(currentTimeUs)) {
++        return;
++    }
++
++    switch (crsfFrame.frame.type) {
++    case CRSF_FRAMETYPE_RC_CHANNELS_PACKED:
++    case CRSF_FRAMETYPE_SUBSET_RC_CHANNELS_PACKED:
++        if (crsfFrame.frame.deviceAddress == CRSF_ADDRESS_FLIGHT_CONTROLLER) {
++            rxRuntimeState->lastRcFrameTimeUs = currentTimeUs;
++            crsfFrameDone = true;
++            memcpy(&crsfChannelDataFrame, &crsfFrame, sizeof(crsfFrame));
++            followUpdateRcData(&crsfChannelDataFrame, sizeof(crsfChannelDataFrame));
++        }
++        break;
++
++#if defined(USE_TELEMETRY_CRSF) && defined(USE_MSP_OVER_TELEMETRY)
++    case CRSF_FRAMETYPE_MSP_REQ:
++    case CRSF_FRAMETYPE_MSP_WRITE: {
++        uint8_t *frameStart = (uint8_t *)&crsfFrame.frame.payload + CRSF_FRAME_ORIGIN_DEST_SIZE;
++        if (bufferCrsfMspFrame(frameStart, crsfFrame.frame.frameLength - 4)) {
++            crsfScheduleMspResponse(crsfFrame.frame.payload[1]);
++        }
++        break;
++    }
++#endif
++#if defined(USE_CRSF_CMS_TELEMETRY)
++    case CRSF_FRAMETYPE_DEVICE_PING:
++        crsfScheduleDeviceInfoResponse();
++        break;
++    case CRSF_FRAMETYPE_DEVICE_INFO:
++        crsfHandleDeviceInfoResponse(crsfFrame.frame.payload);
++        break;
++    case CRSF_FRAMETYPE_DISPLAYPORT_CMD: {
++        uint8_t *frameStart = (uint8_t *)&crsfFrame.frame.payload + CRSF_FRAME_ORIGIN_DEST_SIZE;
++        crsfProcessDisplayPortCmd(frameStart);
++        break;
++    }
++#endif
++#if defined(USE_CRSF_LINK_STATISTICS)
++    case CRSF_FRAMETYPE_LINK_STATISTICS: {
++        if ((rssiSource == RSSI_SOURCE_RX_PROTOCOL_CRSF) &&
++            (crsfFrame.frame.deviceAddress == CRSF_ADDRESS_FLIGHT_CONTROLLER) &&
++            (crsfFrame.frame.frameLength == CRSF_FRAME_ORIGIN_DEST_SIZE + CRSF_FRAME_LINK_STATISTICS_PAYLOAD_SIZE)) {
++            const crsfLinkStatistics_t* statsFrame = (const crsfLinkStatistics_t*)&crsfFrame.frame.payload;
++            handleCrsfLinkStatisticsFrame(statsFrame, currentTimeUs);
++        }
++        break;
++    }
++#if defined(USE_CRSF_V3)
++    case CRSF_FRAMETYPE_LINK_STATISTICS_RX:
++        break;
++    case CRSF_FRAMETYPE_LINK_STATISTICS_TX: {
++        if ((rssiSource == RSSI_SOURCE_RX_PROTOCOL_CRSF) &&
++            (crsfFrame.frame.deviceAddress == CRSF_ADDRESS_FLIGHT_CONTROLLER) &&
++            (crsfFrame.frame.frameLength == CRSF_FRAME_ORIGIN_DEST_SIZE + CRSF_FRAME_LINK_STATISTICS_TX_PAYLOAD_SIZE)) {
++            const crsfLinkStatisticsTx_t* statsFrame = (const crsfLinkStatisticsTx_t*)&crsfFrame.frame.payload;
++            handleCrsfLinkStatisticsTxFrame(statsFrame, currentTimeUs);
++        }
++        break;
++    }
++#endif
++#endif
++    case CRSF_FRAMETYPE_COMMAND:
++        if (crsfIsRxUidCommandFrame()) {
++            crsfHandleRxUidAnnounce(&crsfFrame.bytes[7]);
++#if defined(USE_CRSF_V3)
++        } else if (!fromRcBoard &&
++            (crsfFrame.bytes[fullFrameLength - 2] == crsfFrameCmdCRC()) &&
++            (crsfFrame.bytes[3] == CRSF_ADDRESS_FLIGHT_CONTROLLER)) {
++            // Baud negotiation applies only to the native CRSF receiver UART;
++            // the RC-board transport remains fixed at 115200 baud.
++            crsfProcessCommand(crsfFrame.frame.payload + CRSF_FRAME_ORIGIN_DEST_SIZE);
++#endif
++        }
++        break;
++    default:
++        break;
++    }
++}
++
  // Receive ISR callback, called back from serial port
  STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
  {
-@@ -455,14 +549,16 @@ STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
-                 }
+     rxRuntimeState_t *const rxRuntimeState = (rxRuntimeState_t *const)data;
+ 
+-    static uint8_t crsfFramePosition = 0;
+ #if defined(USE_CRSF_V3)
+     static uint8_t crsfFrameErrorCnt = 0;
  #endif
+     const timeUs_t currentTimeUs = microsISR();
+ 
++    if (crsfRcBoardIsActiveAt(currentTimeUs)) {
++        crsfFramePosition = 0;
++        return;
++    }
++
+ #ifdef DEBUG_CRSF_PACKETS
+     debug[2] = currentTimeUs - crsfFrameStartAtUs;
  #endif
--#if defined(USE_CRSF_V3)
-                 case CRSF_FRAMETYPE_COMMAND:
--                    if ((crsfFrame.bytes[fullFrameLength - 2] == crsfFrameCmdCRC()) &&
-+                    if (crsfIsRxUidCommandFrame()) {
-+                        crsfHandleRxUidAnnounce(&crsfFrame.bytes[7]);
-+#if defined(USE_CRSF_V3)
-+                    } else if ((crsfFrame.bytes[fullFrameLength - 2] == crsfFrameCmdCRC()) &&
-                         (crsfFrame.bytes[3] == CRSF_ADDRESS_FLIGHT_CONTROLLER)) {
-                         crsfProcessCommand(crsfFrame.frame.payload + CRSF_FRAME_ORIGIN_DEST_SIZE);
-+#endif
-                     }
-                     break;
+@@ -394,78 +616,7 @@ STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
+ #if defined(USE_CRSF_V3)
+                 crsfFrameErrorCnt = 0;
+ #endif
+-                switch (crsfFrame.frame.type) {
+-                case CRSF_FRAMETYPE_RC_CHANNELS_PACKED:
+-                case CRSF_FRAMETYPE_SUBSET_RC_CHANNELS_PACKED:
+-                    if (crsfFrame.frame.deviceAddress == CRSF_ADDRESS_FLIGHT_CONTROLLER) {
+-                        rxRuntimeState->lastRcFrameTimeUs = currentTimeUs;
+-                        crsfFrameDone = true;
+-                        memcpy(&crsfChannelDataFrame, &crsfFrame, sizeof(crsfFrame));
+-                        followUpdateRcData(&crsfChannelDataFrame, sizeof(crsfChannelDataFrame));
+-                    }
+-                    break;
+-
+-#if defined(USE_TELEMETRY_CRSF) && defined(USE_MSP_OVER_TELEMETRY)
+-                case CRSF_FRAMETYPE_MSP_REQ:
+-                case CRSF_FRAMETYPE_MSP_WRITE: {
+-                    uint8_t *frameStart = (uint8_t *)&crsfFrame.frame.payload + CRSF_FRAME_ORIGIN_DEST_SIZE;
+-                    if (bufferCrsfMspFrame(frameStart, crsfFrame.frame.frameLength - 4)) {
+-                        crsfScheduleMspResponse(crsfFrame.frame.payload[1]);
+-                    }
+-                    break;
+-                }
 -#endif
-                 default:
-                     break;
-                 }
-@@ -490,6 +586,11 @@ STATIC_UNIT_TESTED uint8_t crsfFrameStatus(rxRuntimeState_t *rxRuntimeState)
+-#if defined(USE_CRSF_CMS_TELEMETRY)
+-                case CRSF_FRAMETYPE_DEVICE_PING:
+-                    crsfScheduleDeviceInfoResponse();
+-                    break;
+-                case CRSF_FRAMETYPE_DEVICE_INFO:
+-                    crsfHandleDeviceInfoResponse(crsfFrame.frame.payload);
+-                    break;
+-                case CRSF_FRAMETYPE_DISPLAYPORT_CMD: {
+-                    uint8_t *frameStart = (uint8_t *)&crsfFrame.frame.payload + CRSF_FRAME_ORIGIN_DEST_SIZE;
+-                    crsfProcessDisplayPortCmd(frameStart);
+-                    break;
+-                }
+-#endif
+-#if defined(USE_CRSF_LINK_STATISTICS)
+-
+-                case CRSF_FRAMETYPE_LINK_STATISTICS: {
+-                    // if to FC and 10 bytes + CRSF_FRAME_ORIGIN_DEST_SIZE
+-                    if ((rssiSource == RSSI_SOURCE_RX_PROTOCOL_CRSF) &&
+-                        (crsfFrame.frame.deviceAddress == CRSF_ADDRESS_FLIGHT_CONTROLLER) &&
+-                        (crsfFrame.frame.frameLength == CRSF_FRAME_ORIGIN_DEST_SIZE + CRSF_FRAME_LINK_STATISTICS_PAYLOAD_SIZE)) {
+-                        const crsfLinkStatistics_t* statsFrame = (const crsfLinkStatistics_t*)&crsfFrame.frame.payload;
+-                        handleCrsfLinkStatisticsFrame(statsFrame, currentTimeUs);
+-                    }
+-                    break;
+-                }
+-#if defined(USE_CRSF_V3)
+-                case CRSF_FRAMETYPE_LINK_STATISTICS_RX: {
+-                    break;
+-                }
+-                case CRSF_FRAMETYPE_LINK_STATISTICS_TX: {
+-                    if ((rssiSource == RSSI_SOURCE_RX_PROTOCOL_CRSF) &&
+-                        (crsfFrame.frame.deviceAddress == CRSF_ADDRESS_FLIGHT_CONTROLLER) &&
+-                        (crsfFrame.frame.frameLength == CRSF_FRAME_ORIGIN_DEST_SIZE + CRSF_FRAME_LINK_STATISTICS_TX_PAYLOAD_SIZE)) {
+-                        const crsfLinkStatisticsTx_t* statsFrame = (const crsfLinkStatisticsTx_t*)&crsfFrame.frame.payload;
+-                        handleCrsfLinkStatisticsTxFrame(statsFrame, currentTimeUs);
+-                    }
+-                    break;
+-                }
+-#endif
+-#endif
+-#if defined(USE_CRSF_V3)
+-                case CRSF_FRAMETYPE_COMMAND:
+-                    if ((crsfFrame.bytes[fullFrameLength - 2] == crsfFrameCmdCRC()) &&
+-                        (crsfFrame.bytes[3] == CRSF_ADDRESS_FLIGHT_CONTROLLER)) {
+-                        crsfProcessCommand(crsfFrame.frame.payload + CRSF_FRAME_ORIGIN_DEST_SIZE);
+-                    }
+-                    break;
+-#endif
+-                default:
+-                    break;
+-                }
++                crsfProcessValidatedFrame(rxRuntimeState, currentTimeUs, fullFrameLength, false);
+             } else {
+ #if defined(USE_CRSF_V3)
+                 if (crsfFrameErrorCnt < CRSF_FRAME_ERROR_COUNT_THRESHOLD)
+@@ -486,10 +637,61 @@ STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
+     }
+ }
+ 
++void crsfRxSetRcBoardPort(serialPort_t *port)
++{
++    rcBoardSerialPort = port;
++}
++
++void crsfRxMarkRcBoardConnected(void)
++{
++    rcBoardLastValidFrameAtUs = microsISR();
++    rcBoardCrsfSeen = true;
++    crsfFramePosition = 0;
++}
++
++void crsfRxReceiveFromRcBoard(uint16_t c)
++{
++    if (crsfRxRuntimeState == NULL) {
++        return;
++    }
++
++    const timeUs_t currentTimeUs = microsISR();
++    if (cmpTimeUs(currentTimeUs, rcBoardCrsfFrameStartAtUs) > CRSF_RC_BOARD_FRAME_TIMEOUT_US) {
++        rcBoardCrsfFramePosition = 0;
++    }
++
++    if (rcBoardCrsfFramePosition == 0) {
++        if ((uint8_t)c != CRSF_SYNC_BYTE) {
++            return;
++        }
++        rcBoardCrsfFrameStartAtUs = currentTimeUs;
++    }
++
++    const int fullFrameLength = rcBoardCrsfFramePosition < 3 ? 5 :
++        MIN(rcBoardCrsfFrame.frame.frameLength + CRSF_FRAME_LENGTH_ADDRESS + CRSF_FRAME_LENGTH_FRAMELENGTH, CRSF_FRAME_SIZE_MAX);
++
++    if (rcBoardCrsfFramePosition < fullFrameLength) {
++        rcBoardCrsfFrame.bytes[rcBoardCrsfFramePosition++] = (uint8_t)c;
++        if (rcBoardCrsfFramePosition >= fullFrameLength) {
++            rcBoardCrsfFramePosition = 0;
++            if (rcBoardCrsfFrame.frame.frameLength >= CRSF_FRAME_LENGTH_TYPE_CRC &&
++                crsfFrameBufferCRC(&rcBoardCrsfFrame) == rcBoardCrsfFrame.bytes[fullFrameLength - 1]) {
++                memcpy(&crsfFrame, &rcBoardCrsfFrame, sizeof(crsfFrame));
++                crsfProcessValidatedFrame(crsfRxRuntimeState, currentTimeUs, fullFrameLength, true);
++            }
++        }
++    }
++}
++
+ STATIC_UNIT_TESTED uint8_t crsfFrameStatus(rxRuntimeState_t *rxRuntimeState)
  {
      UNUSED(rxRuntimeState);
  
@@ -563,10 +842,24 @@ index db5bfe669..ee3796755 100644
  #if defined(USE_CRSF_LINK_STATISTICS)
      crsfCheckRssi(micros());
  #endif
-@@ -630,6 +731,11 @@ bool crsfRxIsTelemetryBufEmpty(void)
+@@ -616,8 +818,9 @@ void crsfRxSendTelemetryData(void)
+ {
+     // if there is telemetry data to write
+     if (telemetryBufLen > 0) {
+-        if (serialPort != NULL) {
+-            serialWriteBuf(serialPort, telemetryBuf, telemetryBufLen);
++        serialPort_t *const activePort = crsfActiveSerialPort();
++        if (activePort != NULL) {
++            serialWriteBuf(activePort, telemetryBuf, telemetryBufLen);
+         }
+         telemetryBufLen = 0; // reset telemetry buffer
+     }
+@@ -630,6 +833,13 @@ bool crsfRxIsTelemetryBufEmpty(void)
  
  bool crsfRxInit(const rxConfig_t *rxConfig, rxRuntimeState_t *rxRuntimeState)
  {
++    crsfRxRuntimeState = rxRuntimeState;
++
 +    if (rxUidConfig()->valid) {
 +        memcpy(crsfRxUid, rxUidConfig()->uid, CRSF_RX_UID_LENGTH);
 +        crsfRxUidReceived = true;
@@ -575,16 +868,63 @@ index db5bfe669..ee3796755 100644
      for (int ii = 0; ii < CRSF_MAX_CHANNEL; ++ii) {
          crsfChannelData[ii] = (16 * rxConfig->midrc) / 10 - 1408;
      }
+@@ -641,7 +851,9 @@ bool crsfRxInit(const rxConfig_t *rxConfig, rxRuntimeState_t *rxRuntimeState)
+ 
+     const serialPortConfig_t *portConfig = findSerialPortConfig(FUNCTION_RX_SERIAL);
+     if (!portConfig) {
+-        return false;
++        // The RC-board port is opened after rxInit().  Treat its configured
++        // presence as a valid CRSF input even when there is no fallback UART.
++        return findSerialPortConfig(FUNCTION_RC_BOARD) != NULL;
+     }
+ 
+     uint32_t crsfBaudrate = CRSF_BAUDRATE;
+@@ -686,12 +898,13 @@ bool crsfRxUseNegotiatedBaud(void)
+ 
+ bool crsfRxIsActive(void)
+ {
+-    return serialPort != NULL;
++    return serialPort != NULL || rcBoardSerialPort != NULL;
+ }
+ 
+ void crsfRxBind(void)
+ {
+-    if (serialPort != NULL) {
++    serialPort_t *const activePort = crsfActiveSerialPort();
++    if (activePort != NULL) {
+         uint8_t bindFrame[] = {
+             CRSF_SYNC_BYTE,
+             0x07,  // frame length
+@@ -703,7 +916,7 @@ void crsfRxBind(void)
+             0x9E,  // Command CRC8
+             0xE8,  // Packet CRC8
+         };
+-        serialWriteBuf(serialPort, bindFrame, 9);
++        serialWriteBuf(activePort, bindFrame, 9);
+     }
+ }
+ #endif
 diff --git a/src/main/rx/crsf.h b/src/main/rx/crsf.h
-index c7323ffd1..50e379bdf 100644
+index c7323ffd1..2c77efb3e 100644
 --- a/src/main/rx/crsf.h
 +++ b/src/main/rx/crsf.h
-@@ -99,3 +99,5 @@ void crsfRxUpdateBaudrate(uint32_t baudrate);
+@@ -20,6 +20,7 @@
+ 
+ #pragma once
+ 
++#include "drivers/serial.h"
+ #include "rx/crsf_protocol.h"
+ 
+ #ifndef RC_RANGE_MIN
+@@ -99,3 +100,8 @@ void crsfRxUpdateBaudrate(uint32_t baudrate);
  bool crsfRxUseNegotiatedBaud(void);
  bool crsfRxIsActive(void);
  void crsfRxBind(void);
 +bool crsfRxGetUid(uint8_t *uid);
 +void crsfRxProcessUidSave(void);
++void crsfRxSetRcBoardPort(serialPort_t *port);
++void crsfRxMarkRcBoardConnected(void);
++void crsfRxReceiveFromRcBoard(uint16_t c);
 diff --git a/src/main/rx/crsf_protocol.h b/src/main/rx/crsf_protocol.h
 index 0b56233f5..1ef1264ab 100644
 --- a/src/main/rx/crsf_protocol.h

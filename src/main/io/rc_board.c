@@ -94,6 +94,11 @@ static void rcBoardDataReceive(uint16_t c, void *data)
 {
     UNUSED(data);
 
+    // The RC-board UART carries both the board control protocol and CRSF data.
+    // Both parsers validate complete frames, so it is safe to feed each byte to
+    // both of them.
+    crsfRxReceiveFromRcBoard(c);
+
     const timeUs_t nowUs = microsISR();
     if (parseState != RC_BOARD_WAIT_HEADER0 &&
         cmpTimeUs(nowUs, parseLastByteUs) > RC_BOARD_FRAME_TIMEOUT_US) {
@@ -144,6 +149,7 @@ static void rcBoardDataReceive(uint16_t c, void *data)
         break;
     case RC_BOARD_WAIT_TAIL:
         if (byte == RC_BOARD_FRAME_TAIL) {
+            crsfRxMarkRcBoardConnected();
             pendingCmd = parseCmd;
             cmdPending = true;
         }
@@ -194,6 +200,8 @@ void rcBoardInit(void)
         RC_BOARD_BAUDRATE,
         MODE_RXTX,
         SERIAL_NOT_INVERTED);
+
+    crsfRxSetRcBoardPort(rcBoardPort);
 }
 
 void rcBoardProcess(void)
