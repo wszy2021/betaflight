@@ -55,6 +55,7 @@
 #include "sensors/compass.h"
 #include "sensors/gyro.h"
 #include "sensors/sensors.h"
+#include "follow/follow_bundle.h"
 
 #if defined(SIMULATOR_BUILD) && defined(SIMULATOR_MULTITHREAD)
 #include <stdio.h>
@@ -112,6 +113,7 @@ quaternion offset = QUATERNION_INITIALIZE;
 
 // absolute angle inclination in multiple of 0.1 degree    180 deg = 1800
 attitudeEulerAngles_t attitude = EULER_INITIALIZE;
+attitudeEulerAngles_f_t attitude_float = {0.0f, 0.0f, 0.0f};
 
 PG_REGISTER_WITH_RESET_TEMPLATE(imuConfig_t, imuConfig, PG_IMU_CONFIG, 3);
 
@@ -309,17 +311,26 @@ STATIC_UNIT_TESTED void imuUpdateEulerAngles(void)
     if (FLIGHT_MODE(HEADFREE_MODE)) {
        imuQuaternionComputeProducts(&headfree, &buffer);
 
-       attitude.values.roll = lrintf(atan2_approx((+2.0f * (buffer.wx + buffer.yz)), (+1.0f - 2.0f * (buffer.xx + buffer.yy))) * (1800.0f / M_PIf));
-       attitude.values.pitch = lrintf(((0.5f * M_PIf) - acos_approx(+2.0f * (buffer.wy - buffer.xz))) * (1800.0f / M_PIf));
-       attitude.values.yaw = lrintf((-atan2_approx((+2.0f * (buffer.wz + buffer.xy)), (+1.0f - 2.0f * (buffer.yy + buffer.zz))) * (1800.0f / M_PIf)));
+       attitude_float.roll = atan2_approx((+2.0f * (buffer.wx + buffer.yz)), (+1.0f - 2.0f * (buffer.xx + buffer.yy))) * (180.0f / M_PIf);
+       attitude_float.pitch = ((0.5f * M_PIf) - acos_approx(+2.0f * (buffer.wy - buffer.xz))) * (180.0f / M_PIf);
+       attitude_float.yaw = (-atan2_approx((+2.0f * (buffer.wz + buffer.xy)), (+1.0f - 2.0f * (buffer.yy + buffer.zz))) * (180.0f / M_PIf));
+       attitude.values.roll = lrintf(attitude_float.roll * 10.0f);
+       attitude.values.pitch = lrintf(attitude_float.pitch * 10.0f);
+       attitude.values.yaw = lrintf(attitude_float.yaw * 10.0f);
     } else {
-       attitude.values.roll = lrintf(atan2_approx(rMat[2][1], rMat[2][2]) * (1800.0f / M_PIf));
-       attitude.values.pitch = lrintf(((0.5f * M_PIf) - acos_approx(-rMat[2][0])) * (1800.0f / M_PIf));
-       attitude.values.yaw = lrintf((-atan2_approx(rMat[1][0], rMat[0][0]) * (1800.0f / M_PIf)));
+       attitude_float.roll = atan2_approx(rMat[2][1], rMat[2][2]) * (180.0f / M_PIf);
+       attitude_float.pitch = ((0.5f * M_PIf) - acos_approx(-rMat[2][0])) * (180.0f / M_PIf);
+       attitude_float.yaw = (-atan2_approx(rMat[1][0], rMat[0][0]) * (180.0f / M_PIf));
+       attitude.values.roll = lrintf(attitude_float.roll * 10.0f);
+       attitude.values.pitch = lrintf(attitude_float.pitch * 10.0f);
+       attitude.values.yaw = lrintf(attitude_float.yaw * 10.0f);
     }
 
     if (attitude.values.yaw < 0) {
         attitude.values.yaw += 3600;
+    }
+    if (attitude_float.yaw < 0.0f) {
+        attitude_float.yaw += 360.0f;
     }
 }
 
@@ -746,6 +757,8 @@ void imuUpdateAttitude(timeUs_t currentTimeUs)
 
     DEBUG_SET(DEBUG_ATTITUDE, 0, attitude.values.roll);
     DEBUG_SET(DEBUG_ATTITUDE, 1, attitude.values.pitch);
+    DEBUG_SET(DEBUG_ATTITUDE, 2, attitude.values.yaw);
+    followUpdateAttitude(attitude_float.pitch, attitude_float.roll, attitude_float.yaw);
 }
 #endif // USE_ACC
 
