@@ -559,6 +559,10 @@ void followDealWithRcValues(void)
         followSystemData.mode = 1;
         followSystemData.traceState = 0;
         followStartTrackProcess();
+        // CH6 selects AI control.  Activate the override immediately so the
+        // RC-board link is no longer required while the tracker acquires a
+        // target.
+        followModeActive = 1;
       }
     }
     else
@@ -588,6 +592,7 @@ void followDealWithRcValues(void)
         followSystemData.mode = 1;
         followSystemData.transferState = 1;
         followSystemData.traceState = 0;
+        followModeActive = 1;
       }
     }
     else

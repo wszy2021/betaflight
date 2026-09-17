@@ -77,6 +77,8 @@ static timeUs_t crsfFrameStartAtUs = 0;
 static uint8_t telemetryBuf[CRSF_FRAME_SIZE_MAX];
 static uint8_t telemetryBufLen = 0;
 static float channelScale = CRSF_RC_CHANNEL_SCALE_LEGACY;
+static bool followControlWasActive;
+static bool followControlUsesRcBoard;
 
 static volatile uint8_t crsfRxUid[CRSF_RX_UID_LENGTH];
 static volatile bool crsfRxUidReceived = false;
@@ -714,6 +716,22 @@ STATIC_UNIT_TESTED uint8_t crsfFrameStatus(rxRuntimeState_t *rxRuntimeState)
 
     crsfFlushRxUidAck();
 
+    // AI control is an RC source in its own right and has priority over the
+    // RC board.  Do not let a missing/expired RC-board frame trigger RXLOSS
+    // while the AI override is active.
+    if (followModeActive) {
+        if (!followControlWasActive) {
+            // Preserve auxiliary channels (especially ARM) from the source
+            // that selected AI control, even after that source is unplugged.
+            followControlUsesRcBoard = crsfRcBoardActive();
+            followControlWasActive = true;
+        }
+        rxRuntimeState->lastRcFrameTimeUs = micros();
+        return RX_FRAME_COMPLETE;
+    }
+    followControlWasActive = false;
+    followControlUsesRcBoard = false;
+
     if (crsfRcBoardActive()) {
 #ifndef UNIT_TEST
         const uint8_t status = rcBoardFrameStatus();
@@ -740,7 +758,13 @@ STATIC_UNIT_TESTED float crsfReadRawRC(const rxRuntimeState_t *rxRuntimeState, u
 {
     UNUSED(rxRuntimeState);
 #ifndef UNIT_TEST
-    if (crsfRcBoardActive()) {
+    if (followModeActive) {
+        // AI owns the four flight channels.  Keep AUX channels, including
+        // ARM, at their last RC-board values during an AI handoff.
+        if (followControlUsesRcBoard && chan >= NON_AUX_CHANNEL_COUNT) {
+            return rcBoardReadRawRC(chan);
+        }
+    } else if (crsfRcBoardActive()) {
         return rcBoardReadRawRC(chan);
     }
 #endif
