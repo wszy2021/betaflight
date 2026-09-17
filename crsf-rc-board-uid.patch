@@ -1,0 +1,968 @@
+diff --git a/mk/source.mk b/mk/source.mk
+index 7422f0fe05..3a950805e6 100644
+--- a/mk/source.mk
++++ b/mk/source.mk
+@@ -57,6 +57,7 @@ COMMON_SRC = \
+             io/beeper.c \
+             io/piniobox.c \
+             io/serial.c \
++            io/rc_board.c \
+             io/smartaudio_protocol.c \
+             io/statusindicator.c \
+             io/tramp_protocol.c \
+diff --git a/src/main/fc/init.c b/src/main/fc/init.c
+index 735e7bd2b9..0b3595bd17 100644
+--- a/src/main/fc/init.c
++++ b/src/main/fc/init.c
+@@ -172,6 +172,7 @@
+ 
+ #include "telemetry/telemetry.h"
+ #include "follow/follow_bundle.h"
++#include "io/rc_board.h"
+ 
+ #ifdef USE_HARDWARE_REVISION_DETECTION
+ #include "hardware_revision.h"
+@@ -771,6 +772,7 @@ void init(void)
+     failsafeInit();
+ 
+     rxInit();
++    rcBoardInit();
+ 
+ #ifdef USE_GPS
+     if (featureIsEnabled(FEATURE_GPS)) {
+diff --git a/src/main/fc/tasks.c b/src/main/fc/tasks.c
+index 38cb2e66ab..d65bd6191c 100644
+--- a/src/main/fc/tasks.c
++++ b/src/main/fc/tasks.c
+@@ -67,6 +67,7 @@
+ #include "io/ledstrip.h"
+ #include "io/piniobox.h"
+ #include "io/serial.h"
++#include "io/rc_board.h"
+ #include "io/transponder_ir.h"
+ #include "io/vtx_tramp.h" // Will be gone
+ #include "io/rcdevice_cam.h"
+@@ -142,11 +143,13 @@ static void taskHandleSerial(timeUs_t currentTimeUs)
+     // in cli mode, all serial stuff goes to here. enter cli mode by sending #
+     if (cliMode) {
+         cliProcess();
++        rcBoardProcess();
+         return;
+     }
+ #endif
+     bool evaluateMspData = ARMING_FLAG(ARMED) ? MSP_SKIP_NON_MSP_DATA : MSP_EVALUATE_NON_MSP_DATA;
+     mspSerialProcess(evaluateMspData, mspFcProcessCommand, mspFcProcessReply);
++    rcBoardProcess();
+ }
+ 
+ static void taskBatteryAlerts(timeUs_t currentTimeUs)
+diff --git a/src/main/io/rc_board.c b/src/main/io/rc_board.c
+new file mode 100644
+index 0000000000..53b8f6a593
+--- /dev/null
++++ b/src/main/io/rc_board.c
+@@ -0,0 +1,368 @@
++#include <stdbool.h>
++#include <stdint.h>
++#include <string.h>
++
++#include "platform.h"
++
++#ifdef USE_SERIALRX_CRSF
++
++#include "build/version.h"
++
++#include "common/crc.h"
++#include "common/maths.h"
++#include "common/utils.h"
++
++#include "drivers/serial.h"
++#include "drivers/time.h"
++
++#include "follow/follow_bundle.h"
++
++#include "io/rc_board.h"
++#include "io/serial.h"
++
++#include "msp/msp_protocol.h"
++
++#include "rx/crsf.h"
++#include "rx/crsf_protocol.h"
++#include "rx/rx.h"
++
++#if defined(USE_VTX_COMMON)
++#include "drivers/vtx_common.h"
++#include "io/vtx.h"
++#endif
++
++#if defined(USE_MSP_OVER_TELEMETRY)
++#include "telemetry/msp_shared.h"
++#endif
++
++#define RC_BOARD_PING_TIMEOUT_US    2000000
++#define RC_BOARD_FRAME_TIMEOUT_US   1750
++
++static serialPort_t *rcBoardPort;
++
++static crsfFrame_t rcBoardFrame;
++static crsfFrame_t rcBoardChannelFrame;
++static uint32_t rcBoardChannelData[CRSF_MAX_CHANNEL];
++static float rcBoardChannelScale = CRSF_RC_CHANNEL_SCALE_LEGACY;
++
++static volatile bool rcBoardFrameDone;
++static volatile bool rcBoardUidReplyPending;
++static volatile bool rcBoardBindPending;
++static volatile bool rcBoardMspPending;
++static volatile bool rcBoardDeviceInfoPending;
++static volatile bool rcBoardConnected;
++static volatile timeUs_t rcBoardLastPingUs;
++static volatile timeUs_t rcBoardLastRcUs;
++static volatile uint8_t rcBoardPingOrigin = CRSF_ADDRESS_CRSF_TRANSMITTER;
++
++static uint8_t rcBoardMspPayload[CRSF_PAYLOAD_SIZE_MAX];
++static volatile uint8_t rcBoardMspLen;
++
++static void rcBoardExpireConnection(void)
++{
++    if (rcBoardConnected && rcBoardLastPingUs != 0 &&
++        cmpTimeUs(micros(), rcBoardLastPingUs) >= RC_BOARD_PING_TIMEOUT_US) {
++        rcBoardConnected = false;
++    }
++}
++
++static void rcBoardSendUidReply(void)
++{
++    if (!rcBoardPort) {
++        return;
++    }
++
++    uint8_t uid[CRSF_RX_UID_LENGTH];
++    if (!crsfRxGetUid(uid)) {
++        return;
++    }
++
++    uint8_t dest = rcBoardPingOrigin;
++    if (dest == 0 || dest == CRSF_ADDRESS_FLIGHT_CONTROLLER) {
++        dest = CRSF_ADDRESS_CRSF_TRANSMITTER;
++    }
++
++    uint8_t frame[2 + CRSF_COMMAND_RX_UID_FRAME_LENGTH];
++    frame[0] = dest;
++    frame[1] = CRSF_COMMAND_RX_UID_FRAME_LENGTH;
++    frame[2] = CRSF_FRAMETYPE_COMMAND;
++    frame[3] = dest;
++    frame[4] = CRSF_ADDRESS_RADIO_TRANSMITTER;
++    frame[5] = CRSF_COMMAND_SUBCMD_RX;
++    frame[6] = CRSF_COMMAND_SUBCMD_RX_GET_UID;
++    memcpy(&frame[7], uid, CRSF_RX_UID_LENGTH);
++
++    uint8_t crc = 0;
++    for (int i = 2; i < 13; i++) {
++        crc = crc8_dvb_s2(crc, frame[i]);
++    }
++    frame[13] = crc;
++
++    serialWriteBuf(rcBoardPort, frame, sizeof(frame));
++}
++
++static void rcBoardSendDeviceInfo(void)
++{
++    if (!rcBoardPort) {
++        return;
++    }
++
++    const char *name = FC_FIRMWARE_NAME;
++    const uint8_t nameLen = strlen(name) + 1; // include NUL
++    uint8_t dest = rcBoardPingOrigin;
++    if (dest == 0 || dest == CRSF_ADDRESS_FLIGHT_CONTROLLER) {
++        dest = CRSF_ADDRESS_CRSF_TRANSMITTER;
++    }
++
++    // type + dest + orig + name\0 + 12 nulls + paramCount + version + crc
++    const uint8_t frameLength = CRSF_FRAME_LENGTH_TYPE + CRSF_FRAME_ORIGIN_DEST_SIZE + nameLen + 12 + 2 + CRSF_FRAME_LENGTH_CRC;
++    uint8_t frame[CRSF_FRAME_SIZE_MAX];
++    uint8_t i = 0;
++
++    frame[i++] = CRSF_SYNC_BYTE;
++    frame[i++] = frameLength;
++    frame[i++] = CRSF_FRAMETYPE_DEVICE_INFO;
++    frame[i++] = dest;
++    frame[i++] = CRSF_ADDRESS_FLIGHT_CONTROLLER;
++    memcpy(&frame[i], name, nameLen);
++    i += nameLen;
++    memset(&frame[i], 0, 12);
++    i += 12;
++    frame[i++] = 0;    // parameter count
++    frame[i++] = 0x01; // parameter version
++
++    uint8_t crc = 0;
++    for (int n = 2; n < i; n++) {
++        crc = crc8_dvb_s2(crc, frame[n]);
++    }
++    frame[i++] = crc;
++
++    serialWriteBuf(rcBoardPort, frame, i);
++}
++
++static bool rcBoardIsCommand(uint8_t subCmd)
++{
++    return rcBoardFrame.frame.type == CRSF_FRAMETYPE_COMMAND &&
++        rcBoardFrame.frame.frameLength >= 6 &&
++        rcBoardFrame.bytes[5] == CRSF_COMMAND_SUBCMD_RX &&
++        rcBoardFrame.bytes[6] == subCmd;
++}
++
++#if defined(USE_VTX_COMMON) && !defined(USE_MSP_OVER_TELEMETRY)
++static void rcBoardApplyVtxConfig(const uint8_t *payload, uint8_t size)
++{
++    if (size < 2) {
++        return;
++    }
++
++    vtxDevice_t *vtxDevice = vtxCommonDevice();
++    const uint16_t newFrequency = payload[0] | ((uint16_t)payload[1] << 8);
++
++    if (newFrequency <= VTXCOMMON_MSP_BANDCHAN_CHKVAL) {
++        const uint8_t newBand = (newFrequency / 8) + 1;
++        const uint8_t newChannel = (newFrequency % 8) + 1;
++        vtxSettingsConfigMutable()->band = newBand;
++        vtxSettingsConfigMutable()->channel = newChannel;
++        vtxSettingsConfigMutable()->freq = vtxCommonLookupFrequency(vtxDevice, newBand, newChannel);
++    } else if (newFrequency <= VTX_SETTINGS_MAX_FREQUENCY_MHZ) {
++        vtxSettingsConfigMutable()->band = 0;
++        vtxSettingsConfigMutable()->freq = newFrequency;
++    }
++
++    if (size >= 3) {
++        vtxSettingsConfigMutable()->power = payload[2];
++    }
++}
++#endif
++
++static void rcBoardHandleMspWrite(uint8_t *msp, uint8_t len)
++{
++#if defined(USE_MSP_OVER_TELEMETRY)
++    handleMspFrame(msp, len, NULL);
++#elif defined(USE_VTX_COMMON)
++    // MSPv1: status, size, cmd, payload...
++    if (len >= 5 && (msp[0] & 0x10) && msp[2] == MSP_SET_VTX_CONFIG) {
++        rcBoardApplyVtxConfig(&msp[3], msp[1]);
++    }
++#else
++    UNUSED(msp);
++    UNUSED(len);
++#endif
++}
++
++static void rcBoardQueueMspWrite(void)
++{
++    const int mspLen = (int)rcBoardFrame.frame.frameLength - 4;
++    if (mspLen <= 0 || mspLen > (int)sizeof(rcBoardMspPayload)) {
++        return;
++    }
++
++    memcpy(rcBoardMspPayload, &rcBoardFrame.bytes[5], mspLen);
++    rcBoardMspLen = (uint8_t)mspLen;
++    rcBoardMspPending = true;
++}
++
++static uint8_t rcBoardFrameCrc(void)
++{
++    uint8_t crc = crc8_dvb_s2(0, rcBoardFrame.frame.type);
++    for (int i = 0; i < rcBoardFrame.frame.frameLength - CRSF_FRAME_LENGTH_TYPE_CRC; ++i) {
++        crc = crc8_dvb_s2(crc, rcBoardFrame.frame.payload[i]);
++    }
++    return crc;
++}
++
++static void rcBoardDataReceive(uint16_t c, void *data)
++{
++    UNUSED(data);
++
++    static uint8_t framePosition = 0;
++    static timeUs_t frameStartUs = 0;
++    const timeUs_t nowUs = microsISR();
++
++    if (cmpTimeUs(nowUs, frameStartUs) > RC_BOARD_FRAME_TIMEOUT_US) {
++        framePosition = 0;
++    }
++
++    if (framePosition == 0) {
++        frameStartUs = nowUs;
++    }
++
++    const int fullFrameLength = framePosition < 3
++        ? 5
++        : MIN(rcBoardFrame.frame.frameLength + CRSF_FRAME_LENGTH_ADDRESS + CRSF_FRAME_LENGTH_FRAMELENGTH, CRSF_FRAME_SIZE_MAX);
++
++    if (framePosition < fullFrameLength) {
++        rcBoardFrame.bytes[framePosition++] = (uint8_t)c;
++        if (framePosition >= fullFrameLength) {
++            framePosition = 0;
++            if (rcBoardFrameCrc() != rcBoardFrame.bytes[fullFrameLength - 1]) {
++                return;
++            }
++
++            switch (rcBoardFrame.frame.type) {
++            case CRSF_FRAMETYPE_DEVICE_PING:
++                rcBoardLastPingUs = nowUs;
++                rcBoardConnected = true;
++                if (rcBoardFrame.frame.frameLength >= 4) {
++                    rcBoardPingOrigin = rcBoardFrame.bytes[4];
++                }
++                rcBoardDeviceInfoPending = true;
++                break;
++
++            case CRSF_FRAMETYPE_RC_CHANNELS_PACKED:
++            case CRSF_FRAMETYPE_SUBSET_RC_CHANNELS_PACKED:
++                memcpy(&rcBoardChannelFrame, &rcBoardFrame, sizeof(rcBoardFrame));
++                rcBoardLastRcUs = nowUs;
++                rcBoardFrameDone = true;
++                if (rcBoardConnected) {
++                    followUpdateRcData(&rcBoardChannelFrame, sizeof(rcBoardChannelFrame));
++                }
++                break;
++
++            case CRSF_FRAMETYPE_COMMAND:
++                if (rcBoardIsCommand(CRSF_COMMAND_SUBCMD_RX_GET_UID)) {
++                    rcBoardUidReplyPending = true;
++                } else if (rcBoardIsCommand(CRSF_COMMAND_SUBCMD_RX_BIND)) {
++                    rcBoardBindPending = true;
++                }
++                break;
++
++            case CRSF_FRAMETYPE_MSP_WRITE:
++            case CRSF_FRAMETYPE_MSP_REQ:
++                rcBoardQueueMspWrite();
++                break;
++
++            default:
++                break;
++            }
++        }
++    }
++}
++
++void rcBoardInit(void)
++{
++    const serialPortConfig_t *portConfig = findSerialPortConfig(FUNCTION_RC_BOARD);
++    if (!portConfig) {
++        return;
++    }
++
++    rcBoardPort = openSerialPort(portConfig->identifier,
++        FUNCTION_RC_BOARD,
++        rcBoardDataReceive,
++        NULL,
++        CRSF_BAUDRATE,
++        CRSF_PORT_MODE,
++        CRSF_PORT_OPTIONS);
++
++    for (int i = 0; i < CRSF_MAX_CHANNEL; ++i) {
++        rcBoardChannelData[i] = (16 * rxConfig()->midrc) / 10 - 1408;
++    }
++}
++
++void rcBoardProcess(void)
++{
++    rcBoardExpireConnection();
++
++    if (rcBoardDeviceInfoPending) {
++        rcBoardDeviceInfoPending = false;
++        rcBoardSendDeviceInfo();
++    }
++
++    if (rcBoardUidReplyPending) {
++        uint8_t uid[CRSF_RX_UID_LENGTH];
++        if (crsfRxGetUid(uid)) {
++            rcBoardUidReplyPending = false;
++            rcBoardSendUidReply();
++        }
++    }
++
++    if (rcBoardBindPending) {
++        rcBoardBindPending = false;
++        crsfRxBind();
++    }
++
++    if (rcBoardMspPending) {
++        uint8_t mspBuf[CRSF_PAYLOAD_SIZE_MAX];
++        const uint8_t mspLen = rcBoardMspLen;
++        memcpy(mspBuf, rcBoardMspPayload, mspLen);
++        rcBoardMspPending = false;
++        rcBoardHandleMspWrite(mspBuf, mspLen);
++    }
++}
++
++bool rcBoardIsConnected(void)
++{
++    return rcBoardPort && rcBoardConnected;
++}
++
++uint8_t rcBoardFrameStatus(void)
++{
++    rcBoardExpireConnection();
++
++    if (!rcBoardFrameDone) {
++        return RX_FRAME_PENDING;
++    }
++
++    rcBoardFrameDone = false;
++    if (crsfDecodeRcChannels(&rcBoardChannelFrame, rcBoardChannelData, &rcBoardChannelScale)) {
++        return RX_FRAME_COMPLETE;
++    }
++
++    return RX_FRAME_PENDING;
++}
++
++float rcBoardReadRawRC(uint8_t chan)
++{
++    if (chan >= CRSF_MAX_CHANNEL) {
++        return 0;
++    }
++
++    return crsfChannelToPwm(rcBoardChannelData[chan], rcBoardChannelScale);
++}
++
++timeUs_t rcBoardLastRcFrameTimeUs(void)
++{
++    return rcBoardLastRcUs;
++}
++
++#endif
+diff --git a/src/main/io/rc_board.h b/src/main/io/rc_board.h
+new file mode 100644
+index 0000000000..3918a06c1e
+--- /dev/null
++++ b/src/main/io/rc_board.h
+@@ -0,0 +1,34 @@
++#pragma once
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#include "common/time.h"
++
++/*
++ * 遥控板串口（CRSF 420000 8N1）
++ *
++ * 遥控板 → FC
++ *   DEVICE_PING  0x28          周期心跳
++ *   RC CHANNELS  0x16 / 0x17   连接时优先用此通道
++ *   GET_RX_UID   COMMAND 0x32 / 0x10 0x0A
++ *   RX_BIND      COMMAND 0x32 / 0x10 0x01
++ *   MSP_WRITE    0x7C  MSP_SET_VTX_CONFIG(89) 切图传频段
++ *
++ * FC → 遥控板
++ *   DEVICE_INFO  0x29          回应 PING，遥控板据此确认已连接
++ *   UID 回复     EE 0C 32 EE EA 10 0A [UID0..5] [CRC]
++ */
++
++#ifdef USE_SERIALRX_CRSF
++void rcBoardInit(void);
++void rcBoardProcess(void);
++bool rcBoardIsConnected(void);
++uint8_t rcBoardFrameStatus(void);
++float rcBoardReadRawRC(uint8_t chan);
++timeUs_t rcBoardLastRcFrameTimeUs(void);
++#else
++static inline void rcBoardInit(void) {}
++static inline void rcBoardProcess(void) {}
++static inline bool rcBoardIsConnected(void) { return false; }
++#endif
+diff --git a/src/main/io/serial.c b/src/main/io/serial.c
+index ddfbd87418..b0011bf5d3 100644
+--- a/src/main/io/serial.c
++++ b/src/main/io/serial.c
+@@ -208,6 +208,16 @@ void pgResetFn_serialConfig(serialConfig_t *serialConfig)
+     }
+ #endif
+ 
++#ifndef RC_BOARD_UART
++#define RC_BOARD_UART SERIAL_PORT_USART2
++#endif
++#ifdef RC_BOARD_UART
++    serialPortConfig_t *rcBoardUartConfig = serialFindPortConfigurationMutable(RC_BOARD_UART);
++    if (rcBoardUartConfig && rcBoardUartConfig->functionMask == 0) {
++        rcBoardUartConfig->functionMask = FUNCTION_RC_BOARD;
++    }
++#endif
++
+ #if defined(USE_MSP_UART)
+     serialPortConfig_t * uart1Config = serialFindPortConfigurationMutable(USE_MSP_UART);
+     if (uart1Config) {
+diff --git a/src/main/io/serial.h b/src/main/io/serial.h
+index 9db0c91ee6..f4267da1fd 100644
+--- a/src/main/io/serial.h
++++ b/src/main/io/serial.h
+@@ -51,6 +51,7 @@ typedef enum {
+     FUNCTION_LIDAR_TF            = (1 << 15), // 32768
+     FUNCTION_FRSKY_OSD           = (1 << 16), // 65536
+     FUNCTION_VTX_MSP             = (1 << 17), // 131072
++    FUNCTION_RC_BOARD            = (1 << 18), // 262144  遥控板：CRSF PING / UID / BIND
+ } serialPortFunction_e;
+ 
+ #define TELEMETRY_SHAREABLE_PORT_FUNCTIONS_MASK (FUNCTION_TELEMETRY_FRSKY_HUB | FUNCTION_TELEMETRY_LTM | FUNCTION_TELEMETRY_MAVLINK)
+diff --git a/src/main/rx/crsf.c b/src/main/rx/crsf.c
+index db5bfe669d..69723d8a4a 100644
+--- a/src/main/rx/crsf.c
++++ b/src/main/rx/crsf.c
+@@ -46,6 +46,9 @@
+ #include "drivers/time.h"
+ 
+ #include "io/serial.h"
++#ifndef UNIT_TEST
++#include "io/rc_board.h"
++#endif
+ 
+ #include "rx/rx.h"
+ #include "rx/crsf.h"
+@@ -75,6 +78,11 @@ static uint8_t telemetryBuf[CRSF_FRAME_SIZE_MAX];
+ static uint8_t telemetryBufLen = 0;
+ static float channelScale = CRSF_RC_CHANNEL_SCALE_LEGACY;
+ 
++static volatile uint8_t crsfRxUid[CRSF_RX_UID_LENGTH];
++static volatile bool crsfRxUidReceived = false;
++static volatile bool crsfUidAckPending = false;
++static volatile uint8_t crsfUidAckDest = CRSF_ADDRESS_CRSF_RECEIVER;
++
+ #ifdef USE_RX_LINK_UPLINK_POWER
+ #define CRSF_UPLINK_POWER_LEVEL_MW_ITEMS_COUNT 9
+ // Uplink power levels by uplinkTXPower expressed in mW (250 mW is from ver >=4.00, 50 mW in a future version and for ExpressLRS)
+@@ -350,6 +358,211 @@ uint32_t *followGetCrsfChannelData(void)
+     return crsfChannelData;
+ }
+ 
++static bool crsfUidBytesSet(const uint8_t *uid)
++{
++    for (int i = 0; i < CRSF_RX_UID_LENGTH; ++i) {
++        if (uid[i] != 0) {
++            return true;
++        }
++    }
++    return false;
++}
++
++static void crsfStoreRxUid(const uint8_t *uid)
++{
++    for (int i = 0; i < CRSF_RX_UID_LENGTH; ++i) {
++        crsfRxUid[i] = uid[i];
++    }
++    crsfRxUidReceived = crsfUidBytesSet(uid);
++}
++
++static void crsfHandleRxUidAnnounce(const uint8_t *uid, uint8_t origin)
++{
++    crsfStoreRxUid(uid);
++    crsfUidAckPending = true;
++    if (origin != 0 && origin != CRSF_ADDRESS_FLIGHT_CONTROLLER) {
++        crsfUidAckDest = origin;
++    }
++}
++
++static bool crsfIsRxUidCommandFrame(void)
++{
++    // C8 0C 32 C8 EC 10 09 [UID0..5] [CRC]
++    // also accept length 13 (extra command CRC) and dest broadcast / any origin
++    return crsfFrame.frame.type == CRSF_FRAMETYPE_COMMAND &&
++        crsfFrame.frame.frameLength >= CRSF_COMMAND_RX_UID_FRAME_LENGTH &&
++        crsfFrame.bytes[5] == CRSF_COMMAND_SUBCMD_RX &&
++        crsfFrame.bytes[6] == CRSF_COMMAND_SUBCMD_RX_UID;
++}
++
++static bool crsfTryHandleUidAnnounce(void)
++{
++    if (!crsfIsRxUidCommandFrame()) {
++        return false;
++    }
++
++    crsfHandleRxUidAnnounce(&crsfFrame.bytes[7], crsfFrame.bytes[4]);
++    return true;
++}
++
++static void crsfSendRxUidAck(void)
++{
++    if (serialPort == NULL) {
++        return;
++    }
++
++    // FC → RX 停发：COMMAND 0x10 0x09（orig=C8）。RX 收到 0x10 0x09 或 0x10 0x0A 即停发。
++    uint8_t ackFrame[9] = {
++        CRSF_SYNC_BYTE,
++        0x07,
++        CRSF_FRAMETYPE_COMMAND,
++        crsfUidAckDest,
++        CRSF_ADDRESS_FLIGHT_CONTROLLER,
++        CRSF_COMMAND_SUBCMD_RX,
++        CRSF_COMMAND_SUBCMD_RX_UID,
++        0,
++        0,
++    };
++
++    uint8_t cmdCrc = 0;
++    uint8_t pktCrc = 0;
++    for (int i = 2; i <= 6; i++) {
++        cmdCrc = crc8_poly_0xba(cmdCrc, ackFrame[i]);
++        pktCrc = crc8_dvb_s2(pktCrc, ackFrame[i]);
++    }
++    ackFrame[7] = cmdCrc;
++    ackFrame[8] = crc8_dvb_s2(pktCrc, cmdCrc);
++
++    serialWriteBuf(serialPort, ackFrame, sizeof(ackFrame));
++}
++
++static void crsfFlushRxUidAck(void)
++{
++    if (!crsfUidAckPending) {
++        return;
++    }
++
++    crsfUidAckPending = false;
++    crsfSendRxUidAck();
++}
++
++bool crsfRxGetUid(uint8_t *uid)
++{
++    if (!uid || !crsfRxUidReceived) {
++        return false;
++    }
++
++    for (int i = 0; i < CRSF_RX_UID_LENGTH; ++i) {
++        uid[i] = crsfRxUid[i];
++    }
++
++    return crsfUidBytesSet(uid);
++}
++
++bool crsfDecodeRcChannels(const crsfFrame_t *frame, uint32_t *channelData, float *scale)
++{
++    if (!frame || !channelData || !scale) {
++        return false;
++    }
++
++    if (frame->frame.type == CRSF_FRAMETYPE_RC_CHANNELS_PACKED) {
++        const crsfPayloadRcChannelsPacked_t *const rcChannels = (const crsfPayloadRcChannelsPacked_t *)&frame->frame.payload;
++        *scale = CRSF_RC_CHANNEL_SCALE_LEGACY;
++        channelData[0] = rcChannels->chan0;
++        channelData[1] = rcChannels->chan1;
++        channelData[2] = rcChannels->chan2;
++        channelData[3] = rcChannels->chan3;
++        channelData[4] = rcChannels->chan4;
++        channelData[5] = rcChannels->chan5;
++        channelData[6] = rcChannels->chan6;
++        channelData[7] = rcChannels->chan7;
++        channelData[8] = rcChannels->chan8;
++        channelData[9] = rcChannels->chan9;
++        channelData[10] = rcChannels->chan10;
++        channelData[11] = rcChannels->chan11;
++        channelData[12] = rcChannels->chan12;
++        channelData[13] = rcChannels->chan13;
++        channelData[14] = rcChannels->chan14;
++        channelData[15] = rcChannels->chan15;
++        return true;
++    }
++
++    if (frame->frame.type != CRSF_FRAMETYPE_SUBSET_RC_CHANNELS_PACKED) {
++        return false;
++    }
++
++    uint8_t readByteIndex = 0;
++    const uint8_t *payload = frame->frame.payload;
++    uint8_t configByte = payload[readByteIndex++];
++    uint8_t startChannel = configByte & CRSF_SUBSET_RC_STARTING_CHANNEL_MASK;
++    configByte >>= CRSF_SUBSET_RC_STARTING_CHANNEL_BITS;
++
++    uint8_t channelBits;
++    uint16_t channelMask;
++    uint8_t channelRes = configByte & CRSF_SUBSET_RC_RES_CONFIGURATION_MASK;
++    configByte >>= CRSF_SUBSET_RC_RES_CONFIGURATION_BITS;
++    switch (channelRes) {
++    case CRSF_SUBSET_RC_RES_CONF_10B:
++        channelBits = CRSF_SUBSET_RC_RES_BITS_10B;
++        channelMask = CRSF_SUBSET_RC_RES_MASK_10B;
++        *scale = CRSF_SUBSET_RC_CHANNEL_SCALE_10B;
++        break;
++    default:
++    case CRSF_SUBSET_RC_RES_CONF_11B:
++        channelBits = CRSF_SUBSET_RC_RES_BITS_11B;
++        channelMask = CRSF_SUBSET_RC_RES_MASK_11B;
++        *scale = CRSF_SUBSET_RC_CHANNEL_SCALE_11B;
++        break;
++    case CRSF_SUBSET_RC_RES_CONF_12B:
++        channelBits = CRSF_SUBSET_RC_RES_BITS_12B;
++        channelMask = CRSF_SUBSET_RC_RES_MASK_12B;
++        *scale = CRSF_SUBSET_RC_CHANNEL_SCALE_12B;
++        break;
++    case CRSF_SUBSET_RC_RES_CONF_13B:
++        channelBits = CRSF_SUBSET_RC_RES_BITS_13B;
++        channelMask = CRSF_SUBSET_RC_RES_MASK_13B;
++        *scale = CRSF_SUBSET_RC_CHANNEL_SCALE_13B;
++        break;
++    }
++
++    configByte >>= CRSF_SUBSET_RC_RESERVED_CONFIGURATION_BITS;
++    UNUSED(configByte);
++
++    uint8_t numOfChannels = ((frame->frame.frameLength - CRSF_FRAME_LENGTH_TYPE_CRC - 1) * 8) / channelBits;
++    uint8_t bitsMerged = 0;
++    uint32_t readValue = 0;
++    for (uint8_t n = 0; n < numOfChannels; n++) {
++        while (bitsMerged < channelBits) {
++            uint8_t readByte = payload[readByteIndex++];
++            readValue |= ((uint32_t)readByte) << bitsMerged;
++            bitsMerged += 8;
++        }
++        channelData[startChannel + n] = readValue & channelMask;
++        readValue >>= channelBits;
++        bitsMerged -= channelBits;
++    }
++
++    return true;
++}
++
++float crsfChannelToPwm(uint32_t raw, float scale)
++{
++    if (scale == CRSF_RC_CHANNEL_SCALE_LEGACY) {
++        return (scale * (float)raw) + 881;
++    }
++
++    return (scale * (float)raw) + 988;
++}
++
++static bool crsfRcBoardActive(void)
++{
++#ifndef UNIT_TEST
++    return rcBoardIsConnected();
++#else
++    return false;
++#endif
++}
++
+ // Receive ISR callback, called back from serial port
+ STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
+ {
+@@ -390,7 +603,14 @@ STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
+         if (crsfFramePosition >= fullFrameLength) {
+             crsfFramePosition = 0;
+             const uint8_t crc = crsfFrameCRC();
+-            if (crc == crsfFrame.bytes[fullFrameLength - 1]) {
++            const bool crcOk = (crc == crsfFrame.bytes[fullFrameLength - 1]);
++            if (crsfTryHandleUidAnnounce()) {
++#if defined(USE_CRSF_V3)
++                if (crcOk) {
++                    crsfFrameErrorCnt = 0;
++                }
++#endif
++            } else if (crcOk) {
+ #if defined(USE_CRSF_V3)
+                 crsfFrameErrorCnt = 0;
+ #endif
+@@ -401,7 +621,9 @@ STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
+                         rxRuntimeState->lastRcFrameTimeUs = currentTimeUs;
+                         crsfFrameDone = true;
+                         memcpy(&crsfChannelDataFrame, &crsfFrame, sizeof(crsfFrame));
+-                        followUpdateRcData(&crsfChannelDataFrame, sizeof(crsfChannelDataFrame));
++                        if (!crsfRcBoardActive()) {
++                            followUpdateRcData(&crsfChannelDataFrame, sizeof(crsfChannelDataFrame));
++                        }
+                     }
+                     break;
+ 
+@@ -455,14 +677,14 @@ STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
+                 }
+ #endif
+ #endif
+-#if defined(USE_CRSF_V3)
+                 case CRSF_FRAMETYPE_COMMAND:
++#if defined(USE_CRSF_V3)
+                     if ((crsfFrame.bytes[fullFrameLength - 2] == crsfFrameCmdCRC()) &&
+                         (crsfFrame.bytes[3] == CRSF_ADDRESS_FLIGHT_CONTROLLER)) {
+                         crsfProcessCommand(crsfFrame.frame.payload + CRSF_FRAME_ORIGIN_DEST_SIZE);
+                     }
+-                    break;
+ #endif
++                    break;
+                 default:
+                     break;
+                 }
+@@ -490,95 +712,26 @@ STATIC_UNIT_TESTED uint8_t crsfFrameStatus(rxRuntimeState_t *rxRuntimeState)
+ {
+     UNUSED(rxRuntimeState);
+ 
++    crsfFlushRxUidAck();
++
++    if (crsfRcBoardActive()) {
++#ifndef UNIT_TEST
++        const uint8_t status = rcBoardFrameStatus();
++        if (status == RX_FRAME_COMPLETE) {
++            rxRuntimeState->lastRcFrameTimeUs = rcBoardLastRcFrameTimeUs();
++        }
++        return status;
++#endif
++    }
++
+ #if defined(USE_CRSF_LINK_STATISTICS)
+     crsfCheckRssi(micros());
+ #endif
+     if (crsfFrameDone) {
+         crsfFrameDone = false;
+-
+-        // unpack the RC channels
+-        if (crsfChannelDataFrame.frame.type == CRSF_FRAMETYPE_RC_CHANNELS_PACKED) {
+-            // use ordinary RC frame structure (0x16)
+-            const crsfPayloadRcChannelsPacked_t* const rcChannels = (crsfPayloadRcChannelsPacked_t*)&crsfChannelDataFrame.frame.payload;
+-            channelScale = CRSF_RC_CHANNEL_SCALE_LEGACY;
+-            crsfChannelData[0] = rcChannels->chan0;
+-            crsfChannelData[1] = rcChannels->chan1;
+-            crsfChannelData[2] = rcChannels->chan2;
+-            crsfChannelData[3] = rcChannels->chan3;
+-            crsfChannelData[4] = rcChannels->chan4;
+-            crsfChannelData[5] = rcChannels->chan5;
+-            crsfChannelData[6] = rcChannels->chan6;
+-            crsfChannelData[7] = rcChannels->chan7;
+-            crsfChannelData[8] = rcChannels->chan8;
+-            crsfChannelData[9] = rcChannels->chan9;
+-            crsfChannelData[10] = rcChannels->chan10;
+-            crsfChannelData[11] = rcChannels->chan11;
+-            crsfChannelData[12] = rcChannels->chan12;
+-            crsfChannelData[13] = rcChannels->chan13;
+-            crsfChannelData[14] = rcChannels->chan14;
+-            crsfChannelData[15] = rcChannels->chan15;
+-        } else {
+-            // use subset RC frame structure (0x17)
+-            uint8_t readByteIndex = 0;
+-            const uint8_t *payload = crsfChannelDataFrame.frame.payload;
+-
+-            // get the configuration byte
+-            uint8_t configByte = payload[readByteIndex++];
+-
+-            // get the channel number of start channel
+-            uint8_t startChannel = configByte & CRSF_SUBSET_RC_STARTING_CHANNEL_MASK;
+-            configByte >>= CRSF_SUBSET_RC_STARTING_CHANNEL_BITS;
+-
+-            // get the channel resolution settings
+-            uint8_t channelBits;
+-            uint16_t channelMask;
+-            uint8_t channelRes = configByte & CRSF_SUBSET_RC_RES_CONFIGURATION_MASK;
+-            configByte >>= CRSF_SUBSET_RC_RES_CONFIGURATION_BITS;
+-            switch (channelRes) {
+-            case CRSF_SUBSET_RC_RES_CONF_10B:
+-                channelBits = CRSF_SUBSET_RC_RES_BITS_10B;
+-                channelMask = CRSF_SUBSET_RC_RES_MASK_10B;
+-                channelScale = CRSF_SUBSET_RC_CHANNEL_SCALE_10B;
+-                break;
+-            default:
+-            case CRSF_SUBSET_RC_RES_CONF_11B:
+-                channelBits = CRSF_SUBSET_RC_RES_BITS_11B;
+-                channelMask = CRSF_SUBSET_RC_RES_MASK_11B;
+-                channelScale = CRSF_SUBSET_RC_CHANNEL_SCALE_11B;
+-                break;
+-            case CRSF_SUBSET_RC_RES_CONF_12B:
+-                channelBits = CRSF_SUBSET_RC_RES_BITS_12B;
+-                channelMask = CRSF_SUBSET_RC_RES_MASK_12B;
+-                channelScale = CRSF_SUBSET_RC_CHANNEL_SCALE_12B;
+-                break;
+-            case CRSF_SUBSET_RC_RES_CONF_13B:
+-                channelBits = CRSF_SUBSET_RC_RES_BITS_13B;
+-                channelMask = CRSF_SUBSET_RC_RES_MASK_13B;
+-                channelScale = CRSF_SUBSET_RC_CHANNEL_SCALE_13B;
+-                break;
+-            }
+-
+-            // do nothing for the reserved configuration bit
+-            configByte >>= CRSF_SUBSET_RC_RESERVED_CONFIGURATION_BITS;
+-
+-            // calculate the number of channels packed
+-            uint8_t numOfChannels = ((crsfChannelDataFrame.frame.frameLength - CRSF_FRAME_LENGTH_TYPE_CRC - 1) * 8) / channelBits;
+-
+-            // unpack the channel data
+-            uint8_t bitsMerged = 0;
+-            uint32_t readValue = 0;
+-            for (uint8_t n = 0; n < numOfChannels; n++) {
+-                while (bitsMerged < channelBits) {
+-                    uint8_t readByte = payload[readByteIndex++];
+-                    readValue |= ((uint32_t) readByte) << bitsMerged;
+-                    bitsMerged += 8;
+-                }
+-                crsfChannelData[startChannel + n] = readValue & channelMask;
+-                readValue >>= channelBits;
+-                bitsMerged -= channelBits;
+-            }
++        if (crsfDecodeRcChannels(&crsfChannelDataFrame, crsfChannelData, &channelScale)) {
++            return RX_FRAME_COMPLETE;
+         }
+-        return RX_FRAME_COMPLETE;
+     }
+     return RX_FRAME_PENDING;
+ }
+@@ -586,23 +739,12 @@ STATIC_UNIT_TESTED uint8_t crsfFrameStatus(rxRuntimeState_t *rxRuntimeState)
+ STATIC_UNIT_TESTED float crsfReadRawRC(const rxRuntimeState_t *rxRuntimeState, uint8_t chan)
+ {
+     UNUSED(rxRuntimeState);
+-    if (channelScale == CRSF_RC_CHANNEL_SCALE_LEGACY) {
+-        /* conversion from RC value to PWM
+-        * for 0x16 RC frame
+-        *       RC     PWM
+-        * min  172 ->  988us
+-        * mid  992 -> 1500us
+-        * max 1811 -> 2012us
+-        * scale factor = (2012-988) / (1811-172) = 0.62477120195241
+-        * offset = 988 - 172 * 0.62477120195241 = 880.53935326418548
+-        */
+-        return (channelScale * (float)crsfChannelData[chan]) + 881;
+-    } else {
+-        /* conversion from RC value to PWM
+-        * for 0x17 Subset RC frame
+-        */
+-        return (channelScale * (float)crsfChannelData[chan]) + 988;
++#ifndef UNIT_TEST
++    if (crsfRcBoardActive()) {
++        return rcBoardReadRawRC(chan);
+     }
++#endif
++    return crsfChannelToPwm(crsfChannelData[chan], channelScale);
+ }
+ 
+ void crsfRxWriteTelemetryData(const void *data, int len)
+@@ -614,6 +756,11 @@ void crsfRxWriteTelemetryData(const void *data, int len)
+ 
+ void crsfRxSendTelemetryData(void)
+ {
++    if (crsfUidAckPending) {
++        crsfFlushRxUidAck();
++        return;
++    }
++
+     // if there is telemetry data to write
+     if (telemetryBufLen > 0) {
+         if (serialPort != NULL) {
+diff --git a/src/main/rx/crsf.h b/src/main/rx/crsf.h
+index c7323ffd1a..3cebb465da 100644
+--- a/src/main/rx/crsf.h
++++ b/src/main/rx/crsf.h
+@@ -99,3 +99,6 @@ void crsfRxUpdateBaudrate(uint32_t baudrate);
+ bool crsfRxUseNegotiatedBaud(void);
+ bool crsfRxIsActive(void);
+ void crsfRxBind(void);
++bool crsfRxGetUid(uint8_t *uid);
++bool crsfDecodeRcChannels(const crsfFrame_t *frame, uint32_t *channelData, float *scale);
++float crsfChannelToPwm(uint32_t raw, float scale);
+diff --git a/src/main/rx/crsf_protocol.h b/src/main/rx/crsf_protocol.h
+index 0b56233f5c..824dc7a6c1 100644
+--- a/src/main/rx/crsf_protocol.h
++++ b/src/main/rx/crsf_protocol.h
+@@ -66,6 +66,14 @@ enum {
+ 
+ enum {
+     CRSF_COMMAND_SUBCMD_RX_BIND = 0x01,    // bind command
++    CRSF_COMMAND_SUBCMD_RX_UID = 0x09,     // RX UID announce
++    CRSF_COMMAND_SUBCMD_RX_GET_UID = 0x0A, // GET_RX_UID / RX stop-send ack
++};
++
++enum {
++    CRSF_RX_UID_LENGTH = 6,
++    // type + dest + origin + cmd + subcmd + UID[6] + CRC
++    CRSF_COMMAND_RX_UID_FRAME_LENGTH = 12,
+ };
+ 
+ enum {

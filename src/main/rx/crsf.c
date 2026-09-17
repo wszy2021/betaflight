@@ -46,6 +46,9 @@
 #include "drivers/time.h"
 
 #include "io/serial.h"
+#ifndef UNIT_TEST
+#include "io/rc_board.h"
+#endif
 
 #include "rx/rx.h"
 #include "rx/crsf.h"
@@ -74,6 +77,11 @@ static timeUs_t crsfFrameStartAtUs = 0;
 static uint8_t telemetryBuf[CRSF_FRAME_SIZE_MAX];
 static uint8_t telemetryBufLen = 0;
 static float channelScale = CRSF_RC_CHANNEL_SCALE_LEGACY;
+
+static volatile uint8_t crsfRxUid[CRSF_RX_UID_LENGTH];
+static volatile bool crsfRxUidReceived = false;
+static volatile bool crsfUidAckPending = false;
+static volatile uint8_t crsfUidAckDest = CRSF_ADDRESS_CRSF_RECEIVER;
 
 #ifdef USE_RX_LINK_UPLINK_POWER
 #define CRSF_UPLINK_POWER_LEVEL_MW_ITEMS_COUNT 9
@@ -350,6 +358,211 @@ uint32_t *followGetCrsfChannelData(void)
     return crsfChannelData;
 }
 
+static bool crsfUidBytesSet(const uint8_t *uid)
+{
+    for (int i = 0; i < CRSF_RX_UID_LENGTH; ++i) {
+        if (uid[i] != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void crsfStoreRxUid(const uint8_t *uid)
+{
+    for (int i = 0; i < CRSF_RX_UID_LENGTH; ++i) {
+        crsfRxUid[i] = uid[i];
+    }
+    crsfRxUidReceived = crsfUidBytesSet(uid);
+}
+
+static void crsfHandleRxUidAnnounce(const uint8_t *uid, uint8_t origin)
+{
+    crsfStoreRxUid(uid);
+    crsfUidAckPending = true;
+    if (origin != 0 && origin != CRSF_ADDRESS_FLIGHT_CONTROLLER) {
+        crsfUidAckDest = origin;
+    }
+}
+
+static bool crsfIsRxUidCommandFrame(void)
+{
+    // C8 0C 32 C8 EC 10 09 [UID0..5] [CRC]
+    // also accept length 13 (extra command CRC) and dest broadcast / any origin
+    return crsfFrame.frame.type == CRSF_FRAMETYPE_COMMAND &&
+        crsfFrame.frame.frameLength >= CRSF_COMMAND_RX_UID_FRAME_LENGTH &&
+        crsfFrame.bytes[5] == CRSF_COMMAND_SUBCMD_RX &&
+        crsfFrame.bytes[6] == CRSF_COMMAND_SUBCMD_RX_UID;
+}
+
+static bool crsfTryHandleUidAnnounce(void)
+{
+    if (!crsfIsRxUidCommandFrame()) {
+        return false;
+    }
+
+    crsfHandleRxUidAnnounce(&crsfFrame.bytes[7], crsfFrame.bytes[4]);
+    return true;
+}
+
+static void crsfSendRxUidAck(void)
+{
+    if (serialPort == NULL) {
+        return;
+    }
+
+    // FC → RX 停发：COMMAND 0x10 0x09（orig=C8）。RX 收到 0x10 0x09 或 0x10 0x0A 即停发。
+    uint8_t ackFrame[9] = {
+        CRSF_SYNC_BYTE,
+        0x07,
+        CRSF_FRAMETYPE_COMMAND,
+        crsfUidAckDest,
+        CRSF_ADDRESS_FLIGHT_CONTROLLER,
+        CRSF_COMMAND_SUBCMD_RX,
+        CRSF_COMMAND_SUBCMD_RX_UID,
+        0,
+        0,
+    };
+
+    uint8_t cmdCrc = 0;
+    uint8_t pktCrc = 0;
+    for (int i = 2; i <= 6; i++) {
+        cmdCrc = crc8_poly_0xba(cmdCrc, ackFrame[i]);
+        pktCrc = crc8_dvb_s2(pktCrc, ackFrame[i]);
+    }
+    ackFrame[7] = cmdCrc;
+    ackFrame[8] = crc8_dvb_s2(pktCrc, cmdCrc);
+
+    serialWriteBuf(serialPort, ackFrame, sizeof(ackFrame));
+}
+
+static void crsfFlushRxUidAck(void)
+{
+    if (!crsfUidAckPending) {
+        return;
+    }
+
+    crsfUidAckPending = false;
+    crsfSendRxUidAck();
+}
+
+bool crsfRxGetUid(uint8_t *uid)
+{
+    if (!uid || !crsfRxUidReceived) {
+        return false;
+    }
+
+    for (int i = 0; i < CRSF_RX_UID_LENGTH; ++i) {
+        uid[i] = crsfRxUid[i];
+    }
+
+    return crsfUidBytesSet(uid);
+}
+
+bool crsfDecodeRcChannels(const crsfFrame_t *frame, uint32_t *channelData, float *scale)
+{
+    if (!frame || !channelData || !scale) {
+        return false;
+    }
+
+    if (frame->frame.type == CRSF_FRAMETYPE_RC_CHANNELS_PACKED) {
+        const crsfPayloadRcChannelsPacked_t *const rcChannels = (const crsfPayloadRcChannelsPacked_t *)&frame->frame.payload;
+        *scale = CRSF_RC_CHANNEL_SCALE_LEGACY;
+        channelData[0] = rcChannels->chan0;
+        channelData[1] = rcChannels->chan1;
+        channelData[2] = rcChannels->chan2;
+        channelData[3] = rcChannels->chan3;
+        channelData[4] = rcChannels->chan4;
+        channelData[5] = rcChannels->chan5;
+        channelData[6] = rcChannels->chan6;
+        channelData[7] = rcChannels->chan7;
+        channelData[8] = rcChannels->chan8;
+        channelData[9] = rcChannels->chan9;
+        channelData[10] = rcChannels->chan10;
+        channelData[11] = rcChannels->chan11;
+        channelData[12] = rcChannels->chan12;
+        channelData[13] = rcChannels->chan13;
+        channelData[14] = rcChannels->chan14;
+        channelData[15] = rcChannels->chan15;
+        return true;
+    }
+
+    if (frame->frame.type != CRSF_FRAMETYPE_SUBSET_RC_CHANNELS_PACKED) {
+        return false;
+    }
+
+    uint8_t readByteIndex = 0;
+    const uint8_t *payload = frame->frame.payload;
+    uint8_t configByte = payload[readByteIndex++];
+    uint8_t startChannel = configByte & CRSF_SUBSET_RC_STARTING_CHANNEL_MASK;
+    configByte >>= CRSF_SUBSET_RC_STARTING_CHANNEL_BITS;
+
+    uint8_t channelBits;
+    uint16_t channelMask;
+    uint8_t channelRes = configByte & CRSF_SUBSET_RC_RES_CONFIGURATION_MASK;
+    configByte >>= CRSF_SUBSET_RC_RES_CONFIGURATION_BITS;
+    switch (channelRes) {
+    case CRSF_SUBSET_RC_RES_CONF_10B:
+        channelBits = CRSF_SUBSET_RC_RES_BITS_10B;
+        channelMask = CRSF_SUBSET_RC_RES_MASK_10B;
+        *scale = CRSF_SUBSET_RC_CHANNEL_SCALE_10B;
+        break;
+    default:
+    case CRSF_SUBSET_RC_RES_CONF_11B:
+        channelBits = CRSF_SUBSET_RC_RES_BITS_11B;
+        channelMask = CRSF_SUBSET_RC_RES_MASK_11B;
+        *scale = CRSF_SUBSET_RC_CHANNEL_SCALE_11B;
+        break;
+    case CRSF_SUBSET_RC_RES_CONF_12B:
+        channelBits = CRSF_SUBSET_RC_RES_BITS_12B;
+        channelMask = CRSF_SUBSET_RC_RES_MASK_12B;
+        *scale = CRSF_SUBSET_RC_CHANNEL_SCALE_12B;
+        break;
+    case CRSF_SUBSET_RC_RES_CONF_13B:
+        channelBits = CRSF_SUBSET_RC_RES_BITS_13B;
+        channelMask = CRSF_SUBSET_RC_RES_MASK_13B;
+        *scale = CRSF_SUBSET_RC_CHANNEL_SCALE_13B;
+        break;
+    }
+
+    configByte >>= CRSF_SUBSET_RC_RESERVED_CONFIGURATION_BITS;
+    UNUSED(configByte);
+
+    uint8_t numOfChannels = ((frame->frame.frameLength - CRSF_FRAME_LENGTH_TYPE_CRC - 1) * 8) / channelBits;
+    uint8_t bitsMerged = 0;
+    uint32_t readValue = 0;
+    for (uint8_t n = 0; n < numOfChannels; n++) {
+        while (bitsMerged < channelBits) {
+            uint8_t readByte = payload[readByteIndex++];
+            readValue |= ((uint32_t)readByte) << bitsMerged;
+            bitsMerged += 8;
+        }
+        channelData[startChannel + n] = readValue & channelMask;
+        readValue >>= channelBits;
+        bitsMerged -= channelBits;
+    }
+
+    return true;
+}
+
+float crsfChannelToPwm(uint32_t raw, float scale)
+{
+    if (scale == CRSF_RC_CHANNEL_SCALE_LEGACY) {
+        return (scale * (float)raw) + 881;
+    }
+
+    return (scale * (float)raw) + 988;
+}
+
+static bool crsfRcBoardActive(void)
+{
+#ifndef UNIT_TEST
+    return rcBoardIsConnected();
+#else
+    return false;
+#endif
+}
+
 // Receive ISR callback, called back from serial port
 STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
 {
@@ -390,7 +603,14 @@ STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
         if (crsfFramePosition >= fullFrameLength) {
             crsfFramePosition = 0;
             const uint8_t crc = crsfFrameCRC();
-            if (crc == crsfFrame.bytes[fullFrameLength - 1]) {
+            const bool crcOk = (crc == crsfFrame.bytes[fullFrameLength - 1]);
+            if (crsfTryHandleUidAnnounce()) {
+#if defined(USE_CRSF_V3)
+                if (crcOk) {
+                    crsfFrameErrorCnt = 0;
+                }
+#endif
+            } else if (crcOk) {
 #if defined(USE_CRSF_V3)
                 crsfFrameErrorCnt = 0;
 #endif
@@ -401,7 +621,9 @@ STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
                         rxRuntimeState->lastRcFrameTimeUs = currentTimeUs;
                         crsfFrameDone = true;
                         memcpy(&crsfChannelDataFrame, &crsfFrame, sizeof(crsfFrame));
-                        followUpdateRcData(&crsfChannelDataFrame, sizeof(crsfChannelDataFrame));
+                        if (!crsfRcBoardActive()) {
+                            followUpdateRcData(&crsfChannelDataFrame, sizeof(crsfChannelDataFrame));
+                        }
                     }
                     break;
 
@@ -455,14 +677,14 @@ STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
                 }
 #endif
 #endif
-#if defined(USE_CRSF_V3)
                 case CRSF_FRAMETYPE_COMMAND:
+#if defined(USE_CRSF_V3)
                     if ((crsfFrame.bytes[fullFrameLength - 2] == crsfFrameCmdCRC()) &&
                         (crsfFrame.bytes[3] == CRSF_ADDRESS_FLIGHT_CONTROLLER)) {
                         crsfProcessCommand(crsfFrame.frame.payload + CRSF_FRAME_ORIGIN_DEST_SIZE);
                     }
-                    break;
 #endif
+                    break;
                 default:
                     break;
                 }
@@ -490,95 +712,26 @@ STATIC_UNIT_TESTED uint8_t crsfFrameStatus(rxRuntimeState_t *rxRuntimeState)
 {
     UNUSED(rxRuntimeState);
 
+    crsfFlushRxUidAck();
+
+    if (crsfRcBoardActive()) {
+#ifndef UNIT_TEST
+        const uint8_t status = rcBoardFrameStatus();
+        if (status == RX_FRAME_COMPLETE) {
+            rxRuntimeState->lastRcFrameTimeUs = rcBoardLastRcFrameTimeUs();
+        }
+        return status;
+#endif
+    }
+
 #if defined(USE_CRSF_LINK_STATISTICS)
     crsfCheckRssi(micros());
 #endif
     if (crsfFrameDone) {
         crsfFrameDone = false;
-
-        // unpack the RC channels
-        if (crsfChannelDataFrame.frame.type == CRSF_FRAMETYPE_RC_CHANNELS_PACKED) {
-            // use ordinary RC frame structure (0x16)
-            const crsfPayloadRcChannelsPacked_t* const rcChannels = (crsfPayloadRcChannelsPacked_t*)&crsfChannelDataFrame.frame.payload;
-            channelScale = CRSF_RC_CHANNEL_SCALE_LEGACY;
-            crsfChannelData[0] = rcChannels->chan0;
-            crsfChannelData[1] = rcChannels->chan1;
-            crsfChannelData[2] = rcChannels->chan2;
-            crsfChannelData[3] = rcChannels->chan3;
-            crsfChannelData[4] = rcChannels->chan4;
-            crsfChannelData[5] = rcChannels->chan5;
-            crsfChannelData[6] = rcChannels->chan6;
-            crsfChannelData[7] = rcChannels->chan7;
-            crsfChannelData[8] = rcChannels->chan8;
-            crsfChannelData[9] = rcChannels->chan9;
-            crsfChannelData[10] = rcChannels->chan10;
-            crsfChannelData[11] = rcChannels->chan11;
-            crsfChannelData[12] = rcChannels->chan12;
-            crsfChannelData[13] = rcChannels->chan13;
-            crsfChannelData[14] = rcChannels->chan14;
-            crsfChannelData[15] = rcChannels->chan15;
-        } else {
-            // use subset RC frame structure (0x17)
-            uint8_t readByteIndex = 0;
-            const uint8_t *payload = crsfChannelDataFrame.frame.payload;
-
-            // get the configuration byte
-            uint8_t configByte = payload[readByteIndex++];
-
-            // get the channel number of start channel
-            uint8_t startChannel = configByte & CRSF_SUBSET_RC_STARTING_CHANNEL_MASK;
-            configByte >>= CRSF_SUBSET_RC_STARTING_CHANNEL_BITS;
-
-            // get the channel resolution settings
-            uint8_t channelBits;
-            uint16_t channelMask;
-            uint8_t channelRes = configByte & CRSF_SUBSET_RC_RES_CONFIGURATION_MASK;
-            configByte >>= CRSF_SUBSET_RC_RES_CONFIGURATION_BITS;
-            switch (channelRes) {
-            case CRSF_SUBSET_RC_RES_CONF_10B:
-                channelBits = CRSF_SUBSET_RC_RES_BITS_10B;
-                channelMask = CRSF_SUBSET_RC_RES_MASK_10B;
-                channelScale = CRSF_SUBSET_RC_CHANNEL_SCALE_10B;
-                break;
-            default:
-            case CRSF_SUBSET_RC_RES_CONF_11B:
-                channelBits = CRSF_SUBSET_RC_RES_BITS_11B;
-                channelMask = CRSF_SUBSET_RC_RES_MASK_11B;
-                channelScale = CRSF_SUBSET_RC_CHANNEL_SCALE_11B;
-                break;
-            case CRSF_SUBSET_RC_RES_CONF_12B:
-                channelBits = CRSF_SUBSET_RC_RES_BITS_12B;
-                channelMask = CRSF_SUBSET_RC_RES_MASK_12B;
-                channelScale = CRSF_SUBSET_RC_CHANNEL_SCALE_12B;
-                break;
-            case CRSF_SUBSET_RC_RES_CONF_13B:
-                channelBits = CRSF_SUBSET_RC_RES_BITS_13B;
-                channelMask = CRSF_SUBSET_RC_RES_MASK_13B;
-                channelScale = CRSF_SUBSET_RC_CHANNEL_SCALE_13B;
-                break;
-            }
-
-            // do nothing for the reserved configuration bit
-            configByte >>= CRSF_SUBSET_RC_RESERVED_CONFIGURATION_BITS;
-
-            // calculate the number of channels packed
-            uint8_t numOfChannels = ((crsfChannelDataFrame.frame.frameLength - CRSF_FRAME_LENGTH_TYPE_CRC - 1) * 8) / channelBits;
-
-            // unpack the channel data
-            uint8_t bitsMerged = 0;
-            uint32_t readValue = 0;
-            for (uint8_t n = 0; n < numOfChannels; n++) {
-                while (bitsMerged < channelBits) {
-                    uint8_t readByte = payload[readByteIndex++];
-                    readValue |= ((uint32_t) readByte) << bitsMerged;
-                    bitsMerged += 8;
-                }
-                crsfChannelData[startChannel + n] = readValue & channelMask;
-                readValue >>= channelBits;
-                bitsMerged -= channelBits;
-            }
+        if (crsfDecodeRcChannels(&crsfChannelDataFrame, crsfChannelData, &channelScale)) {
+            return RX_FRAME_COMPLETE;
         }
-        return RX_FRAME_COMPLETE;
     }
     return RX_FRAME_PENDING;
 }
@@ -586,23 +739,12 @@ STATIC_UNIT_TESTED uint8_t crsfFrameStatus(rxRuntimeState_t *rxRuntimeState)
 STATIC_UNIT_TESTED float crsfReadRawRC(const rxRuntimeState_t *rxRuntimeState, uint8_t chan)
 {
     UNUSED(rxRuntimeState);
-    if (channelScale == CRSF_RC_CHANNEL_SCALE_LEGACY) {
-        /* conversion from RC value to PWM
-        * for 0x16 RC frame
-        *       RC     PWM
-        * min  172 ->  988us
-        * mid  992 -> 1500us
-        * max 1811 -> 2012us
-        * scale factor = (2012-988) / (1811-172) = 0.62477120195241
-        * offset = 988 - 172 * 0.62477120195241 = 880.53935326418548
-        */
-        return (channelScale * (float)crsfChannelData[chan]) + 881;
-    } else {
-        /* conversion from RC value to PWM
-        * for 0x17 Subset RC frame
-        */
-        return (channelScale * (float)crsfChannelData[chan]) + 988;
+#ifndef UNIT_TEST
+    if (crsfRcBoardActive()) {
+        return rcBoardReadRawRC(chan);
     }
+#endif
+    return crsfChannelToPwm(crsfChannelData[chan], channelScale);
 }
 
 void crsfRxWriteTelemetryData(const void *data, int len)
@@ -614,6 +756,11 @@ void crsfRxWriteTelemetryData(const void *data, int len)
 
 void crsfRxSendTelemetryData(void)
 {
+    if (crsfUidAckPending) {
+        crsfFlushRxUidAck();
+        return;
+    }
+
     // if there is telemetry data to write
     if (telemetryBufLen > 0) {
         if (serialPort != NULL) {
