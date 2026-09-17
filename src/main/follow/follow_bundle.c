@@ -1367,8 +1367,8 @@ void followAnalyzeSerialInput(void)
         }
         else
         {
-          followSystemData.trackErrorX = curr->coordinateX - 960;
-          followSystemData.trackErrorY = curr->coordinateY - 540;
+          followSystemData.trackErrorX = -(curr->coordinateY - 540);
+          followSystemData.trackErrorY = curr->coordinateX - 960;
           followSystemData.cameraResolutionX = 1920;
           followSystemData.cameraResolutionY = 1080;
         }

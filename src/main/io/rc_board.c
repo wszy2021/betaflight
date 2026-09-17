@@ -35,7 +35,7 @@
 #include "telemetry/msp_shared.h"
 #endif
 
-#define RC_BOARD_PING_TIMEOUT_US    2000000
+#define RC_BOARD_PING_TIMEOUT_US    1000000
 #define RC_BOARD_FRAME_TIMEOUT_US   1750
 
 static serialPort_t *rcBoardPort;
