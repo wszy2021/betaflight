@@ -67,6 +67,7 @@
 #include "io/ledstrip.h"
 #include "io/piniobox.h"
 #include "io/serial.h"
+#include "io/rc_board.h"
 #include "io/transponder_ir.h"
 #include "io/vtx_tramp.h" // Will be gone
 #include "io/rcdevice_cam.h"
@@ -142,11 +143,13 @@ static void taskHandleSerial(timeUs_t currentTimeUs)
     // in cli mode, all serial stuff goes to here. enter cli mode by sending #
     if (cliMode) {
         cliProcess();
+        rcBoardProcess();
         return;
     }
 #endif
     bool evaluateMspData = ARMING_FLAG(ARMED) ? MSP_SKIP_NON_MSP_DATA : MSP_EVALUATE_NON_MSP_DATA;
     mspSerialProcess(evaluateMspData, mspFcProcessCommand, mspFcProcessReply);
+    rcBoardProcess();
 }
 
 static void taskBatteryAlerts(timeUs_t currentTimeUs)

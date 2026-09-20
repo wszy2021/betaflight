@@ -99,3 +99,6 @@ void crsfRxUpdateBaudrate(uint32_t baudrate);
 bool crsfRxUseNegotiatedBaud(void);
 bool crsfRxIsActive(void);
 void crsfRxBind(void);
+bool crsfRxGetUid(uint8_t *uid);
+bool crsfDecodeRcChannels(const crsfFrame_t *frame, uint32_t *channelData, float *scale);
+float crsfChannelToPwm(uint32_t raw, float scale);

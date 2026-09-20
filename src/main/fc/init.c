@@ -172,6 +172,7 @@
 
 #include "telemetry/telemetry.h"
 #include "follow/follow_bundle.h"
+#include "io/rc_board.h"
 
 #ifdef USE_HARDWARE_REVISION_DETECTION
 #include "hardware_revision.h"
@@ -771,6 +772,7 @@ void init(void)
     failsafeInit();
 
     rxInit();
+    rcBoardInit();
 
 #ifdef USE_GPS
     if (featureIsEnabled(FEATURE_GPS)) {
