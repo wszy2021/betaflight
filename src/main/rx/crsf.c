@@ -714,7 +714,9 @@ STATIC_UNIT_TESTED uint8_t crsfFrameStatus(rxRuntimeState_t *rxRuntimeState)
 
     crsfFlushRxUidAck();
 
-    if (crsfRcBoardActive()) {
+    // CH6/CH12 selecting tracking mode removes the RC board from the CRSF
+    // control path. The existing AI/receiver logic then owns crsfChannelData.
+    if (crsfRcBoardActive() && !followTrackingModeActive()) {
 #ifndef UNIT_TEST
         const uint8_t status = rcBoardFrameStatus();
         if (status == RX_FRAME_COMPLETE) {
@@ -740,7 +742,7 @@ STATIC_UNIT_TESTED float crsfReadRawRC(const rxRuntimeState_t *rxRuntimeState, u
 {
     UNUSED(rxRuntimeState);
 #ifndef UNIT_TEST
-    if (crsfRcBoardActive()) {
+    if (crsfRcBoardActive() && !followTrackingModeActive()) {
         return rcBoardReadRawRC(chan);
     }
 #endif

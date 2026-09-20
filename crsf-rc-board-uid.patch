@@ -58,7 +58,7 @@ index 38cb2e66ab..d65bd6191c 100644
  static void taskBatteryAlerts(timeUs_t currentTimeUs)
 diff --git a/src/main/io/rc_board.c b/src/main/io/rc_board.c
 new file mode 100644
-index 0000000000..53b8f6a593
+index 0000000000..d71f6a1001
 --- /dev/null
 +++ b/src/main/io/rc_board.c
 @@ -0,0 +1,368 @@
@@ -99,7 +99,7 @@ index 0000000000..53b8f6a593
 +#include "telemetry/msp_shared.h"
 +#endif
 +
-+#define RC_BOARD_PING_TIMEOUT_US    2000000
++#define RC_BOARD_PING_TIMEOUT_US    1000000
 +#define RC_BOARD_FRAME_TIMEOUT_US   1750
 +
 +static serialPort_t *rcBoardPort;
@@ -471,7 +471,7 @@ index 0000000000..3918a06c1e
 +static inline bool rcBoardIsConnected(void) { return false; }
 +#endif
 diff --git a/src/main/io/serial.c b/src/main/io/serial.c
-index ddfbd87418..b0011bf5d3 100644
+index ddfbd87418..1fb300efbc 100644
 --- a/src/main/io/serial.c
 +++ b/src/main/io/serial.c
 @@ -208,6 +208,16 @@ void pgResetFn_serialConfig(serialConfig_t *serialConfig)
@@ -479,7 +479,7 @@ index ddfbd87418..b0011bf5d3 100644
  #endif
  
 +#ifndef RC_BOARD_UART
-+#define RC_BOARD_UART SERIAL_PORT_USART2
++#define RC_BOARD_UART SERIAL_PORT_USART6
 +#endif
 +#ifdef RC_BOARD_UART
 +    serialPortConfig_t *rcBoardUartConfig = serialFindPortConfigurationMutable(RC_BOARD_UART);
@@ -504,7 +504,7 @@ index 9db0c91ee6..f4267da1fd 100644
  
  #define TELEMETRY_SHAREABLE_PORT_FUNCTIONS_MASK (FUNCTION_TELEMETRY_FRSKY_HUB | FUNCTION_TELEMETRY_LTM | FUNCTION_TELEMETRY_MAVLINK)
 diff --git a/src/main/rx/crsf.c b/src/main/rx/crsf.c
-index db5bfe669d..69723d8a4a 100644
+index db5bfe669d..d7ceecc5bc 100644
 --- a/src/main/rx/crsf.c
 +++ b/src/main/rx/crsf.c
 @@ -46,6 +46,9 @@
@@ -785,13 +785,15 @@ index db5bfe669d..69723d8a4a 100644
                  default:
                      break;
                  }
-@@ -490,95 +712,26 @@ STATIC_UNIT_TESTED uint8_t crsfFrameStatus(rxRuntimeState_t *rxRuntimeState)
+@@ -490,95 +712,28 @@ STATIC_UNIT_TESTED uint8_t crsfFrameStatus(rxRuntimeState_t *rxRuntimeState)
  {
      UNUSED(rxRuntimeState);
  
 +    crsfFlushRxUidAck();
 +
-+    if (crsfRcBoardActive()) {
++    // CH6/CH12 selecting tracking mode removes the RC board from the CRSF
++    // control path. The existing AI/receiver logic then owns crsfChannelData.
++    if (crsfRcBoardActive() && !followTrackingModeActive()) {
 +#ifndef UNIT_TEST
 +        const uint8_t status = rcBoardFrameStatus();
 +        if (status == RX_FRAME_COMPLETE) {
@@ -895,7 +897,7 @@ index db5bfe669d..69723d8a4a 100644
      }
      return RX_FRAME_PENDING;
  }
-@@ -586,23 +739,12 @@ STATIC_UNIT_TESTED uint8_t crsfFrameStatus(rxRuntimeState_t *rxRuntimeState)
+@@ -586,23 +741,12 @@ STATIC_UNIT_TESTED uint8_t crsfFrameStatus(rxRuntimeState_t *rxRuntimeState)
  STATIC_UNIT_TESTED float crsfReadRawRC(const rxRuntimeState_t *rxRuntimeState, uint8_t chan)
  {
      UNUSED(rxRuntimeState);
@@ -916,7 +918,7 @@ index db5bfe669d..69723d8a4a 100644
 -        */
 -        return (channelScale * (float)crsfChannelData[chan]) + 988;
 +#ifndef UNIT_TEST
-+    if (crsfRcBoardActive()) {
++    if (crsfRcBoardActive() && !followTrackingModeActive()) {
 +        return rcBoardReadRawRC(chan);
      }
 +#endif
@@ -924,7 +926,7 @@ index db5bfe669d..69723d8a4a 100644
  }
  
  void crsfRxWriteTelemetryData(const void *data, int len)
-@@ -614,6 +756,11 @@ void crsfRxWriteTelemetryData(const void *data, int len)
+@@ -614,6 +758,11 @@ void crsfRxWriteTelemetryData(const void *data, int len)
  
  void crsfRxSendTelemetryData(void)
  {
