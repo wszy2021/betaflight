@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "platform.h"
+#include "follow/follow_bundle.h"
 
 #ifdef USE_SERIALRX_CRSF
 
@@ -344,6 +345,11 @@ STATIC_UNIT_TESTED uint8_t crsfFrameCmdCRC(void)
 }
 #endif
 
+uint32_t *followGetCrsfChannelData(void)
+{
+    return crsfChannelData;
+}
+
 // Receive ISR callback, called back from serial port
 STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
 {
@@ -395,6 +401,7 @@ STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
                         rxRuntimeState->lastRcFrameTimeUs = currentTimeUs;
                         crsfFrameDone = true;
                         memcpy(&crsfChannelDataFrame, &crsfFrame, sizeof(crsfFrame));
+                        followUpdateRcData(&crsfChannelDataFrame, sizeof(crsfChannelDataFrame));
                     }
                     break;
 

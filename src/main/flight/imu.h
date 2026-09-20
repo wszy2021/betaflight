@@ -47,6 +47,11 @@ typedef union {
         int16_t yaw;
     } values;
 } attitudeEulerAngles_t;
+
+typedef struct {
+    float roll, pitch, yaw;
+} attitudeEulerAngles_f_t;
+
 #define EULER_INITIALIZE  { { 0, 0, 0 } }
 
 extern attitudeEulerAngles_t attitude;

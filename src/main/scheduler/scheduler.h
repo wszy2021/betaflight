@@ -180,6 +180,10 @@ typedef enum {
     TASK_RC_STATS,
 #endif
 
+    TASK_FOLLOW_TRACKER,
+    TASK_FOLLOW_TIMER,
+    TASK_FOLLOW_UPDATE,
+
     /* Count of real tasks */
     TASK_COUNT,
 

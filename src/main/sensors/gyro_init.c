@@ -663,6 +663,7 @@ bool gyroInit(void)
         gyro.gyroSensor2.gyroDev.dev.rxBuf = &gyroBuf2[GYRO_BUF_SIZE / 2];
 
         gyroInitSensor(&gyro.gyroSensor2, gyroDeviceConfig(1));
+        gyroApplySavedCalibration(&gyro.gyroSensor2, GYRO_CONFIG_USE_GYRO_2);
         gyro.gyroHasOverflowProtection = gyro.gyroHasOverflowProtection && gyro.gyroSensor2.gyroDev.gyroHasOverflowProtection;
         detectedSensors[SENSOR_INDEX_GYRO] = gyro.gyroSensor2.gyroDev.gyroHardware;
     }
@@ -678,6 +679,7 @@ bool gyroInit(void)
         gyro.gyroSensor1.gyroDev.dev.txBuf = gyroBuf1;
         gyro.gyroSensor1.gyroDev.dev.rxBuf = &gyroBuf1[GYRO_BUF_SIZE / 2];
         gyroInitSensor(&gyro.gyroSensor1, gyroDeviceConfig(0));
+        gyroApplySavedCalibration(&gyro.gyroSensor1, GYRO_CONFIG_USE_GYRO_1);
         gyro.gyroHasOverflowProtection =  gyro.gyroHasOverflowProtection && gyro.gyroSensor1.gyroDev.gyroHasOverflowProtection;
         detectedSensors[SENSOR_INDEX_GYRO] = gyro.gyroSensor1.gyroDev.gyroHardware;
     }

@@ -22,6 +22,16 @@
 
 #include "rx/crsf_protocol.h"
 
+#ifndef RC_RANGE_MIN
+#define RC_RANGE_MIN 172
+#define RC_RANGE_MAX 1811
+#define RC_RANGE_TERM 992
+#define RC_RANGE_WIDE 1639
+#define RC_RANGE_TH_MIN 271
+#define RC_RANGE_TH_MAX 1791
+#define RC_RANGE_TH_WIDE 1520
+#endif
+
 
 #define CRSF_PORT_OPTIONS       (SERIAL_STOPBITS_1 | SERIAL_PARITY_NO)
 #define CRSF_PORT_MODE          MODE_RXTX

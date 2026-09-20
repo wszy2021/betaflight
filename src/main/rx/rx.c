@@ -71,6 +71,7 @@
 #include "rx/rx_spi.h"
 #include "rx/targetcustomserial.h"
 #include "rx/msp_override.h"
+#include "follow/follow_bundle.h"
 
 
 const char rcChannelLetters[] = "AERT12345678abcdefgh";
@@ -576,7 +577,14 @@ FAST_CODE_NOINLINE void rxFrameCheck(timeUs_t currentTimeUs, timeDelta_t current
         }
     }
 #endif
-    
+
+    if (followCrsfOverridePending()) {
+        rxSignalReceived = true;
+        needRxSignalBefore = currentTimeUs + needRxSignalMaxDelayUs;
+        rxDataProcessingRequired = true;
+        followCrsfClearPending();
+    }
+
     DEBUG_SET(DEBUG_FAILSAFE, 1, rxSignalReceived);
     DEBUG_SET(DEBUG_RX_SIGNAL_LOSS, 0, rxSignalReceived);
 }
@@ -788,6 +796,8 @@ bool calculateRxChannelsAndUpdateFailsafe(timeUs_t currentTimeUs)
 
         return true;
     }
+
+    followAdjustCrsfDataIfNecessary();
 
     readRxChannelsApplyRanges();            // returns rcRaw
     detectAndApplySignalLossBehaviour();    // returns rcData

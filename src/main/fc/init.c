@@ -171,6 +171,7 @@
 #include "sensors/initialisation.h"
 
 #include "telemetry/telemetry.h"
+#include "follow/follow_bundle.h"
 
 #ifdef USE_HARDWARE_REVISION_DETECTION
 #include "hardware_revision.h"
@@ -181,6 +182,19 @@ void targetPreInit(void);
 #endif
 
 uint8_t systemState = SYSTEM_STATE_INITIALISING;
+
+static bool servoOutputsConfigured(void)
+{
+#ifdef USE_SERVOS
+    for (uint8_t i = 0; i < MAX_SUPPORTED_SERVOS; i++) {
+        if (servoConfig()->dev.ioTags[i]) {
+            return true;
+        }
+    }
+#endif
+
+    return false;
+}
 
 #ifdef BUS_SWITCH_PIN
 void busSwitchInit(void)
@@ -712,7 +726,7 @@ void init(void)
 
 #ifdef USE_SERVOS
     servosInit();
-    if (isMixerUsingServos()) {
+    if (isMixerUsingServos() || servoOutputsConfigured()) {
         //pwm_params.useChannelForwarding = featureIsEnabled(FEATURE_CHANNEL_FORWARDING);
         servoDevInit(&servoConfig()->dev);
     }
@@ -823,7 +837,6 @@ void init(void)
         accStartCalibration();
     }
 #endif
-    gyroStartCalibration(false);
 #ifdef USE_BARO
     baroStartCalibration();
 #endif
@@ -1002,6 +1015,8 @@ void init(void)
     debugInit();
 
     unusedPinsInit();
+
+    followTrackerInit();
 
     tasksInit();
 

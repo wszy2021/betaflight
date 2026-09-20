@@ -23,6 +23,7 @@
 #include <string.h>
 
 #include "platform.h"
+#include "follow/follow_bundle.h"
 
 #ifdef USE_TELEMETRY_CRSF
 
@@ -398,6 +399,8 @@ void crsfFrameFlightMode(sbuf_t *dst)
     } else if (airmodeIsEnabled()) {
         flightMode = "AIR";
     }
+
+    followUpdateFlightMode(flightMode);
 
     sbufWriteString(dst, flightMode);
     if (!ARMING_FLAG(ARMED)) {
