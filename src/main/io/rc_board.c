@@ -36,6 +36,7 @@
 #endif
 
 #define RC_BOARD_PING_TIMEOUT_US    1000000
+#define RC_BOARD_RC_TIMEOUT_US      75000
 #define RC_BOARD_FRAME_TIMEOUT_US   1750
 
 static serialPort_t *rcBoardPort;
@@ -370,7 +371,14 @@ void rcBoardProcess(void)
 
 bool rcBoardIsConnected(void)
 {
+    rcBoardExpireConnection();
     return rcBoardPort && rcBoardConnected;
+}
+
+bool rcBoardHasFreshRcData(void)
+{
+    return rcBoardIsConnected() && rcBoardLastRcUs != 0 &&
+        cmpTimeUs(micros(), rcBoardLastRcUs) < RC_BOARD_RC_TIMEOUT_US;
 }
 
 uint8_t rcBoardFrameStatus(void)

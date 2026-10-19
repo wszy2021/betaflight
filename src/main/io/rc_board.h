@@ -25,6 +25,7 @@
 void rcBoardInit(void);
 void rcBoardProcess(void);
 bool rcBoardIsConnected(void);
+bool rcBoardHasFreshRcData(void);
 uint8_t rcBoardFrameStatus(void);
 float rcBoardReadRawRC(uint8_t chan);
 timeUs_t rcBoardLastRcFrameTimeUs(void);
@@ -32,4 +33,5 @@ timeUs_t rcBoardLastRcFrameTimeUs(void);
 static inline void rcBoardInit(void) {}
 static inline void rcBoardProcess(void) {}
 static inline bool rcBoardIsConnected(void) { return false; }
+static inline bool rcBoardHasFreshRcData(void) { return false; }
 #endif

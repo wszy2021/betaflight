@@ -58,10 +58,10 @@ index 38cb2e66ab..d65bd6191c 100644
  static void taskBatteryAlerts(timeUs_t currentTimeUs)
 diff --git a/src/main/io/rc_board.c b/src/main/io/rc_board.c
 new file mode 100644
-index 0000000000..a2e5e5edde
+index 0000000000..39f4ad117f
 --- /dev/null
 +++ b/src/main/io/rc_board.c
-@@ -0,0 +1,406 @@
+@@ -0,0 +1,414 @@
 +#include <stdbool.h>
 +#include <stdint.h>
 +#include <string.h>
@@ -100,6 +100,7 @@ index 0000000000..a2e5e5edde
 +#endif
 +
 +#define RC_BOARD_PING_TIMEOUT_US    1000000
++#define RC_BOARD_RC_TIMEOUT_US      75000
 +#define RC_BOARD_FRAME_TIMEOUT_US   1750
 +
 +static serialPort_t *rcBoardPort;
@@ -434,7 +435,14 @@ index 0000000000..a2e5e5edde
 +
 +bool rcBoardIsConnected(void)
 +{
++    rcBoardExpireConnection();
 +    return rcBoardPort && rcBoardConnected;
++}
++
++bool rcBoardHasFreshRcData(void)
++{
++    return rcBoardIsConnected() && rcBoardLastRcUs != 0 &&
++        cmpTimeUs(micros(), rcBoardLastRcUs) < RC_BOARD_RC_TIMEOUT_US;
 +}
 +
 +uint8_t rcBoardFrameStatus(void)
@@ -470,10 +478,10 @@ index 0000000000..a2e5e5edde
 +#endif
 diff --git a/src/main/io/rc_board.h b/src/main/io/rc_board.h
 new file mode 100644
-index 0000000000..f57d09635d
+index 0000000000..7aa25b9161
 --- /dev/null
 +++ b/src/main/io/rc_board.h
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,37 @@
 +#pragma once
 +
 +#include <stdbool.h>
@@ -501,6 +509,7 @@ index 0000000000..f57d09635d
 +void rcBoardInit(void);
 +void rcBoardProcess(void);
 +bool rcBoardIsConnected(void);
++bool rcBoardHasFreshRcData(void);
 +uint8_t rcBoardFrameStatus(void);
 +float rcBoardReadRawRC(uint8_t chan);
 +timeUs_t rcBoardLastRcFrameTimeUs(void);
@@ -508,6 +517,7 @@ index 0000000000..f57d09635d
 +static inline void rcBoardInit(void) {}
 +static inline void rcBoardProcess(void) {}
 +static inline bool rcBoardIsConnected(void) { return false; }
++static inline bool rcBoardHasFreshRcData(void) { return false; }
 +#endif
 diff --git a/src/main/io/serial.c b/src/main/io/serial.c
 index ddfbd87418..1fb300efbc 100644
@@ -543,7 +553,7 @@ index 9db0c91ee6..f4267da1fd 100644
  
  #define TELEMETRY_SHAREABLE_PORT_FUNCTIONS_MASK (FUNCTION_TELEMETRY_FRSKY_HUB | FUNCTION_TELEMETRY_LTM | FUNCTION_TELEMETRY_MAVLINK)
 diff --git a/src/main/rx/crsf.c b/src/main/rx/crsf.c
-index db5bfe669d..d7ceecc5bc 100644
+index db5bfe669d..e0f2a2fd5b 100644
 --- a/src/main/rx/crsf.c
 +++ b/src/main/rx/crsf.c
 @@ -46,6 +46,9 @@
@@ -556,19 +566,20 @@ index db5bfe669d..d7ceecc5bc 100644
  
  #include "rx/rx.h"
  #include "rx/crsf.h"
-@@ -75,6 +78,11 @@ static uint8_t telemetryBuf[CRSF_FRAME_SIZE_MAX];
+@@ -74,6 +77,12 @@ static timeUs_t crsfFrameStartAtUs = 0;
+ static uint8_t telemetryBuf[CRSF_FRAME_SIZE_MAX];
  static uint8_t telemetryBufLen = 0;
  static float channelScale = CRSF_RC_CHANNEL_SCALE_LEGACY;
- 
++static bool crsfChannelsFromRcBoard = false;
++
 +static volatile uint8_t crsfRxUid[CRSF_RX_UID_LENGTH];
 +static volatile bool crsfRxUidReceived = false;
 +static volatile bool crsfUidAckPending = false;
 +static volatile uint8_t crsfUidAckDest = CRSF_ADDRESS_CRSF_RECEIVER;
-+
+ 
  #ifdef USE_RX_LINK_UPLINK_POWER
  #define CRSF_UPLINK_POWER_LEVEL_MW_ITEMS_COUNT 9
- // Uplink power levels by uplinkTXPower expressed in mW (250 mW is from ver >=4.00, 50 mW in a future version and for ExpressLRS)
-@@ -350,6 +358,211 @@ uint32_t *followGetCrsfChannelData(void)
+@@ -350,6 +359,213 @@ uint32_t *followGetCrsfChannelData(void)
      return crsfChannelData;
  }
  
@@ -771,7 +782,9 @@ index db5bfe669d..d7ceecc5bc 100644
 +static bool crsfRcBoardActive(void)
 +{
 +#ifndef UNIT_TEST
-+    return rcBoardIsConnected();
++    // A heartbeat alone is not enough to own the control path.  Fall back to
++    // the receiver before Betaflight's 100ms RX loss timeout when RC data stops.
++    return rcBoardHasFreshRcData();
 +#else
 +    return false;
 +#endif
@@ -780,7 +793,7 @@ index db5bfe669d..d7ceecc5bc 100644
  // Receive ISR callback, called back from serial port
  STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
  {
-@@ -390,7 +603,14 @@ STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
+@@ -390,7 +606,14 @@ STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
          if (crsfFramePosition >= fullFrameLength) {
              crsfFramePosition = 0;
              const uint8_t crc = crsfFrameCRC();
@@ -796,7 +809,7 @@ index db5bfe669d..d7ceecc5bc 100644
  #if defined(USE_CRSF_V3)
                  crsfFrameErrorCnt = 0;
  #endif
-@@ -401,7 +621,9 @@ STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
+@@ -401,7 +624,9 @@ STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
                          rxRuntimeState->lastRcFrameTimeUs = currentTimeUs;
                          crsfFrameDone = true;
                          memcpy(&crsfChannelDataFrame, &crsfFrame, sizeof(crsfFrame));
@@ -807,7 +820,7 @@ index db5bfe669d..d7ceecc5bc 100644
                      }
                      break;
  
-@@ -455,14 +677,14 @@ STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
+@@ -455,14 +680,14 @@ STATIC_UNIT_TESTED void crsfDataReceive(uint16_t c, void *data)
                  }
  #endif
  #endif
@@ -824,7 +837,7 @@ index db5bfe669d..d7ceecc5bc 100644
                  default:
                      break;
                  }
-@@ -490,95 +712,28 @@ STATIC_UNIT_TESTED uint8_t crsfFrameStatus(rxRuntimeState_t *rxRuntimeState)
+@@ -490,95 +715,30 @@ STATIC_UNIT_TESTED uint8_t crsfFrameStatus(rxRuntimeState_t *rxRuntimeState)
  {
      UNUSED(rxRuntimeState);
  
@@ -836,6 +849,7 @@ index db5bfe669d..d7ceecc5bc 100644
 +#ifndef UNIT_TEST
 +        const uint8_t status = rcBoardFrameStatus();
 +        if (status == RX_FRAME_COMPLETE) {
++            crsfChannelsFromRcBoard = true;
 +            rxRuntimeState->lastRcFrameTimeUs = rcBoardLastRcFrameTimeUs();
 +        }
 +        return status;
@@ -930,13 +944,14 @@ index db5bfe669d..d7ceecc5bc 100644
 -                bitsMerged -= channelBits;
 -            }
 +        if (crsfDecodeRcChannels(&crsfChannelDataFrame, crsfChannelData, &channelScale)) {
++            crsfChannelsFromRcBoard = false;
 +            return RX_FRAME_COMPLETE;
          }
 -        return RX_FRAME_COMPLETE;
      }
      return RX_FRAME_PENDING;
  }
-@@ -586,23 +741,12 @@ STATIC_UNIT_TESTED uint8_t crsfFrameStatus(rxRuntimeState_t *rxRuntimeState)
+@@ -586,23 +746,12 @@ STATIC_UNIT_TESTED uint8_t crsfFrameStatus(rxRuntimeState_t *rxRuntimeState)
  STATIC_UNIT_TESTED float crsfReadRawRC(const rxRuntimeState_t *rxRuntimeState, uint8_t chan)
  {
      UNUSED(rxRuntimeState);
@@ -957,7 +972,7 @@ index db5bfe669d..d7ceecc5bc 100644
 -        */
 -        return (channelScale * (float)crsfChannelData[chan]) + 988;
 +#ifndef UNIT_TEST
-+    if (crsfRcBoardActive() && !followTrackingModeActive()) {
++    if (crsfChannelsFromRcBoard && !followTrackingModeActive()) {
 +        return rcBoardReadRawRC(chan);
      }
 +#endif
@@ -965,7 +980,7 @@ index db5bfe669d..d7ceecc5bc 100644
  }
  
  void crsfRxWriteTelemetryData(const void *data, int len)
-@@ -614,6 +758,11 @@ void crsfRxWriteTelemetryData(const void *data, int len)
+@@ -614,6 +763,11 @@ void crsfRxWriteTelemetryData(const void *data, int len)
  
  void crsfRxSendTelemetryData(void)
  {

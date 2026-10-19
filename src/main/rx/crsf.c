@@ -77,6 +77,7 @@ static timeUs_t crsfFrameStartAtUs = 0;
 static uint8_t telemetryBuf[CRSF_FRAME_SIZE_MAX];
 static uint8_t telemetryBufLen = 0;
 static float channelScale = CRSF_RC_CHANNEL_SCALE_LEGACY;
+static bool crsfChannelsFromRcBoard = false;
 
 static volatile uint8_t crsfRxUid[CRSF_RX_UID_LENGTH];
 static volatile bool crsfRxUidReceived = false;
@@ -557,7 +558,9 @@ float crsfChannelToPwm(uint32_t raw, float scale)
 static bool crsfRcBoardActive(void)
 {
 #ifndef UNIT_TEST
-    return rcBoardIsConnected();
+    // A heartbeat alone is not enough to own the control path.  Fall back to
+    // the receiver before Betaflight's 100ms RX loss timeout when RC data stops.
+    return rcBoardHasFreshRcData();
 #else
     return false;
 #endif
@@ -720,6 +723,7 @@ STATIC_UNIT_TESTED uint8_t crsfFrameStatus(rxRuntimeState_t *rxRuntimeState)
 #ifndef UNIT_TEST
         const uint8_t status = rcBoardFrameStatus();
         if (status == RX_FRAME_COMPLETE) {
+            crsfChannelsFromRcBoard = true;
             rxRuntimeState->lastRcFrameTimeUs = rcBoardLastRcFrameTimeUs();
         }
         return status;
@@ -732,6 +736,7 @@ STATIC_UNIT_TESTED uint8_t crsfFrameStatus(rxRuntimeState_t *rxRuntimeState)
     if (crsfFrameDone) {
         crsfFrameDone = false;
         if (crsfDecodeRcChannels(&crsfChannelDataFrame, crsfChannelData, &channelScale)) {
+            crsfChannelsFromRcBoard = false;
             return RX_FRAME_COMPLETE;
         }
     }
@@ -742,7 +747,7 @@ STATIC_UNIT_TESTED float crsfReadRawRC(const rxRuntimeState_t *rxRuntimeState, u
 {
     UNUSED(rxRuntimeState);
 #ifndef UNIT_TEST
-    if (crsfRcBoardActive() && !followTrackingModeActive()) {
+    if (crsfChannelsFromRcBoard && !followTrackingModeActive()) {
         return rcBoardReadRawRC(chan);
     }
 #endif
