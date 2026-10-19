@@ -148,7 +148,19 @@ static bool rcBoardIsCommand(uint8_t subCmd)
         rcBoardFrame.bytes[6] == subCmd;
 }
 
-#if defined(USE_VTX_COMMON) && !defined(USE_MSP_OVER_TELEMETRY)
+#if defined(USE_VTX_COMMON)
+static bool rcBoardGetVtxConfigPayload(const uint8_t *msp, uint8_t len, const uint8_t **payload, uint8_t *size)
+{
+    // The remote board sends a complete MSPv1 request in one CRSF MSP_WRITE frame.
+    if (len < 5 || !(msp[0] & 0x10) || msp[1] < 2 || msp[1] > len - 3 || msp[2] != MSP_SET_VTX_CONFIG) {
+        return false;
+    }
+
+    *payload = &msp[3];
+    *size = msp[1];
+    return true;
+}
+
 static void rcBoardApplyVtxConfig(const uint8_t *payload, uint8_t size)
 {
     if (size < 2) {
@@ -156,35 +168,61 @@ static void rcBoardApplyVtxConfig(const uint8_t *payload, uint8_t size)
     }
 
     vtxDevice_t *vtxDevice = vtxCommonDevice();
-    const uint16_t newFrequency = payload[0] | ((uint16_t)payload[1] << 8);
-
-    if (newFrequency <= VTXCOMMON_MSP_BANDCHAN_CHKVAL) {
-        const uint8_t newBand = (newFrequency / 8) + 1;
-        const uint8_t newChannel = (newFrequency % 8) + 1;
-        vtxSettingsConfigMutable()->band = newBand;
-        vtxSettingsConfigMutable()->channel = newChannel;
-        vtxSettingsConfigMutable()->freq = vtxCommonLookupFrequency(vtxDevice, newBand, newChannel);
-    } else if (newFrequency <= VTX_SETTINGS_MAX_FREQUENCY_MHZ) {
-        vtxSettingsConfigMutable()->band = 0;
-        vtxSettingsConfigMutable()->freq = newFrequency;
+    if (!vtxDevice) {
+        return;
     }
+
+    const uint16_t bandChannelOrFrequency = payload[0] | ((uint16_t)payload[1] << 8);
+    uint8_t newBand = 0;
+    uint8_t newChannel = 0;
+
+    if (bandChannelOrFrequency <= VTXCOMMON_MSP_BANDCHAN_CHKVAL) {
+        newBand = (bandChannelOrFrequency / 8) + 1;
+        newChannel = (bandChannelOrFrequency % 8) + 1;
+    } else {
+        // A frequency command is accepted only when that frequency exists in the loaded VTX table.
+        vtxCommonLookupBandChan(vtxDevice, bandChannelOrFrequency, &newBand, &newChannel);
+    }
+
+    const uint16_t newFrequency = vtxCommonLookupFrequency(vtxDevice, newBand, newChannel);
+    if (!newFrequency) {
+        return;
+    }
+
+    vtxSettingsConfigMutable()->band = newBand;
+    vtxSettingsConfigMutable()->channel = newChannel;
+    vtxSettingsConfigMutable()->freq = newFrequency;
+
+    // Apply immediately. The normal VTX update loop intentionally defers band/channel changes while armed.
+    vtxCommonSetBandAndChannel(vtxDevice, newBand, newChannel);
 
     if (size >= 3) {
         vtxSettingsConfigMutable()->power = payload[2];
+        vtxCommonSetPowerByIndex(vtxDevice, payload[2]);
     }
 }
 #endif
 
 static void rcBoardHandleMspWrite(uint8_t *msp, uint8_t len)
 {
+#if defined(USE_VTX_COMMON)
+    const uint8_t *vtxPayload;
+    uint8_t vtxPayloadSize;
+    if (rcBoardGetVtxConfigPayload(msp, len, &vtxPayload, &vtxPayloadSize)) {
+#if defined(USE_MSP_OVER_TELEMETRY)
+        // Preserve all standard MSP_SET_VTX_CONFIG fields (pit mode, low-power disarm, etc.).
+        if ((msp[0] & 0x60) == 0x20) {
+            handleMspFrame(msp, len, NULL);
+        }
+#endif
+        rcBoardApplyVtxConfig(vtxPayload, vtxPayloadSize);
+        return;
+    }
+#endif
+
 #if defined(USE_MSP_OVER_TELEMETRY)
     handleMspFrame(msp, len, NULL);
-#elif defined(USE_VTX_COMMON)
-    // MSPv1: status, size, cmd, payload...
-    if (len >= 5 && (msp[0] & 0x10) && msp[2] == MSP_SET_VTX_CONFIG) {
-        rcBoardApplyVtxConfig(&msp[3], msp[1]);
-    }
-#else
+#elif !defined(USE_VTX_COMMON)
     UNUSED(msp);
     UNUSED(len);
 #endif

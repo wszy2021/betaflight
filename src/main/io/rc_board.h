@@ -13,7 +13,8 @@
  *   RC CHANNELS  0x16 / 0x17   连接时优先用此通道
  *   GET_RX_UID   COMMAND 0x32 / 0x10 0x0A
  *   RX_BIND      COMMAND 0x32 / 0x10 0x01
- *   MSP_WRITE    0x7C  MSP_SET_VTX_CONFIG(89) 切图传频段
+ *   MSP_WRITE    0x7C  MSP_SET_VTX_CONFIG(89) 按当前 VTX 表切换图传频段
+ *                           uint16: (band - 1) * 8 + (channel - 1)，小端序
  *
  * FC → 遥控板
  *   DEVICE_INFO  0x29          回应 PING，遥控板据此确认已连接

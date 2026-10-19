@@ -58,10 +58,10 @@ index 38cb2e66ab..d65bd6191c 100644
  static void taskBatteryAlerts(timeUs_t currentTimeUs)
 diff --git a/src/main/io/rc_board.c b/src/main/io/rc_board.c
 new file mode 100644
-index 0000000000..d71f6a1001
+index 0000000000..a2e5e5edde
 --- /dev/null
 +++ b/src/main/io/rc_board.c
-@@ -0,0 +1,368 @@
+@@ -0,0 +1,406 @@
 +#include <stdbool.h>
 +#include <stdint.h>
 +#include <string.h>
@@ -212,7 +212,19 @@ index 0000000000..d71f6a1001
 +        rcBoardFrame.bytes[6] == subCmd;
 +}
 +
-+#if defined(USE_VTX_COMMON) && !defined(USE_MSP_OVER_TELEMETRY)
++#if defined(USE_VTX_COMMON)
++static bool rcBoardGetVtxConfigPayload(const uint8_t *msp, uint8_t len, const uint8_t **payload, uint8_t *size)
++{
++    // The remote board sends a complete MSPv1 request in one CRSF MSP_WRITE frame.
++    if (len < 5 || !(msp[0] & 0x10) || msp[1] < 2 || msp[1] > len - 3 || msp[2] != MSP_SET_VTX_CONFIG) {
++        return false;
++    }
++
++    *payload = &msp[3];
++    *size = msp[1];
++    return true;
++}
++
 +static void rcBoardApplyVtxConfig(const uint8_t *payload, uint8_t size)
 +{
 +    if (size < 2) {
@@ -220,35 +232,61 @@ index 0000000000..d71f6a1001
 +    }
 +
 +    vtxDevice_t *vtxDevice = vtxCommonDevice();
-+    const uint16_t newFrequency = payload[0] | ((uint16_t)payload[1] << 8);
-+
-+    if (newFrequency <= VTXCOMMON_MSP_BANDCHAN_CHKVAL) {
-+        const uint8_t newBand = (newFrequency / 8) + 1;
-+        const uint8_t newChannel = (newFrequency % 8) + 1;
-+        vtxSettingsConfigMutable()->band = newBand;
-+        vtxSettingsConfigMutable()->channel = newChannel;
-+        vtxSettingsConfigMutable()->freq = vtxCommonLookupFrequency(vtxDevice, newBand, newChannel);
-+    } else if (newFrequency <= VTX_SETTINGS_MAX_FREQUENCY_MHZ) {
-+        vtxSettingsConfigMutable()->band = 0;
-+        vtxSettingsConfigMutable()->freq = newFrequency;
++    if (!vtxDevice) {
++        return;
 +    }
++
++    const uint16_t bandChannelOrFrequency = payload[0] | ((uint16_t)payload[1] << 8);
++    uint8_t newBand = 0;
++    uint8_t newChannel = 0;
++
++    if (bandChannelOrFrequency <= VTXCOMMON_MSP_BANDCHAN_CHKVAL) {
++        newBand = (bandChannelOrFrequency / 8) + 1;
++        newChannel = (bandChannelOrFrequency % 8) + 1;
++    } else {
++        // A frequency command is accepted only when that frequency exists in the loaded VTX table.
++        vtxCommonLookupBandChan(vtxDevice, bandChannelOrFrequency, &newBand, &newChannel);
++    }
++
++    const uint16_t newFrequency = vtxCommonLookupFrequency(vtxDevice, newBand, newChannel);
++    if (!newFrequency) {
++        return;
++    }
++
++    vtxSettingsConfigMutable()->band = newBand;
++    vtxSettingsConfigMutable()->channel = newChannel;
++    vtxSettingsConfigMutable()->freq = newFrequency;
++
++    // Apply immediately. The normal VTX update loop intentionally defers band/channel changes while armed.
++    vtxCommonSetBandAndChannel(vtxDevice, newBand, newChannel);
 +
 +    if (size >= 3) {
 +        vtxSettingsConfigMutable()->power = payload[2];
++        vtxCommonSetPowerByIndex(vtxDevice, payload[2]);
 +    }
 +}
 +#endif
 +
 +static void rcBoardHandleMspWrite(uint8_t *msp, uint8_t len)
 +{
++#if defined(USE_VTX_COMMON)
++    const uint8_t *vtxPayload;
++    uint8_t vtxPayloadSize;
++    if (rcBoardGetVtxConfigPayload(msp, len, &vtxPayload, &vtxPayloadSize)) {
++#if defined(USE_MSP_OVER_TELEMETRY)
++        // Preserve all standard MSP_SET_VTX_CONFIG fields (pit mode, low-power disarm, etc.).
++        if ((msp[0] & 0x60) == 0x20) {
++            handleMspFrame(msp, len, NULL);
++        }
++#endif
++        rcBoardApplyVtxConfig(vtxPayload, vtxPayloadSize);
++        return;
++    }
++#endif
++
 +#if defined(USE_MSP_OVER_TELEMETRY)
 +    handleMspFrame(msp, len, NULL);
-+#elif defined(USE_VTX_COMMON)
-+    // MSPv1: status, size, cmd, payload...
-+    if (len >= 5 && (msp[0] & 0x10) && msp[2] == MSP_SET_VTX_CONFIG) {
-+        rcBoardApplyVtxConfig(&msp[3], msp[1]);
-+    }
-+#else
++#elif !defined(USE_VTX_COMMON)
 +    UNUSED(msp);
 +    UNUSED(len);
 +#endif
@@ -432,10 +470,10 @@ index 0000000000..d71f6a1001
 +#endif
 diff --git a/src/main/io/rc_board.h b/src/main/io/rc_board.h
 new file mode 100644
-index 0000000000..3918a06c1e
+index 0000000000..f57d09635d
 --- /dev/null
 +++ b/src/main/io/rc_board.h
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,35 @@
 +#pragma once
 +
 +#include <stdbool.h>
@@ -451,7 +489,8 @@ index 0000000000..3918a06c1e
 + *   RC CHANNELS  0x16 / 0x17   连接时优先用此通道
 + *   GET_RX_UID   COMMAND 0x32 / 0x10 0x0A
 + *   RX_BIND      COMMAND 0x32 / 0x10 0x01
-+ *   MSP_WRITE    0x7C  MSP_SET_VTX_CONFIG(89) 切图传频段
++ *   MSP_WRITE    0x7C  MSP_SET_VTX_CONFIG(89) 按当前 VTX 表切换图传频段
++ *                           uint16: (band - 1) * 8 + (channel - 1)，小端序
 + *
 + * FC → 遥控板
 + *   DEVICE_INFO  0x29          回应 PING，遥控板据此确认已连接
